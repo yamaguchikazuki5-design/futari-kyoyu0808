@@ -33,8 +33,8 @@ import {
   ExternalLink,
   Edit2,
   Loader2,
-  MapPin,
-  Luggage
+  Luggage,
+  Key
 } from 'lucide-react';
 
 // --- お二人専用のFirebase接続設定 ---
@@ -120,6 +120,7 @@ export default function App() {
   const [recipes, setRecipes] = useState(() => loadLocal('recipes', []));
   const [trash, setTrash] = useState(() => loadLocal('trash', []));
   const [freqs, setFreqs] = useState(() => loadLocal('freqs', ['牛乳', 'たまご', 'お米', '食パン', '納豆', '玉ねぎ', '豚肉', 'トイレットペーパー']));
+  const [userGeminiKey, setUserGeminiKey] = useState(() => loadLocal('g_key', ''));
 
   useEffect(() => {
     signInAnonymously(auth).catch((err) => {
@@ -179,7 +180,6 @@ export default function App() {
   const [sAuthor, setSAuthor] = useState('共通');
   const [sMemo, setSMemo] = useState('');
 
-  // 泊数・日数の計算関数
   const getDurationText = (start, end) => {
     if (!start || !end) return '';
     const d1 = new Date(start);
@@ -245,12 +245,10 @@ export default function App() {
     }
   };
 
-  // 選択日の予定一覧（連日予定も全て正しく抽出）
   const dayScheds = useMemo(() => {
     return scheds
       .filter((s) => selDate >= s.startDate && selDate <= (s.endDate || s.startDate))
       .sort((a, b) => {
-        // 連日予定を先頭に、時間はその後にソート
         if (a.isMultiDay && !b.isMultiDay) return -1;
         if (!a.isMultiDay && b.isMultiDay) return 1;
         return (a.time || '99:99').localeCompare(b.time || '99:99');
@@ -328,147 +326,211 @@ export default function App() {
   const [openAiModal, setOpenAiModal] = useState(false);
   const [aiInput, setAiInput] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
+  const [aiStatusMsg, setAiStatusMsg] = useState('');
   const [previewRecipe, setPreviewRecipe] = useState(null);
   const [editingRecipe, setEditingRecipe] = useState(null);
   const [recipeTab, setRecipeTab] = useState('ingredients');
   const [expRecipeId, setExpRecipeId] = useState(null);
   const [openTrash, setOpenTrash] = useState(false);
   const [rQuery, setRQuery] = useState('');
+  const [openApiKeyModal, setOpenApiKeyModal] = useState(false);
+  const [tempApiKey, setTempApiKey] = useState(userGeminiKey);
 
-  // 高度AI解析（動画URL・概要欄・字幕テキストの網羅的抽出）
+  // --- 高精度レシピ解析エンジン（概要欄テキストを食材・調味料・手順に分解） ---
+  const parseRecipeTextDetailed = (rawText, defaultTitle) => {
+    const lines = rawText.split('\n').map((l) => l.trim()).filter(Boolean);
+    let title = defaultTitle || '新しいレシピ';
+    const ings = [];
+    const seas = [];
+    const stps = [];
+
+    const seasoningKeywords = [
+      '醤油', 'しょうゆ', 'みりん', '酒', '塩', '胡椒', 'こしょう', '砂糖', '油', 'ごま油',
+      'オリーブオイル', 'サラダ油', '酢', '大さじ', '小さじ', '顆粒', 'コンソメ', 'ほんだし',
+      'だしの素', '鶏がら', '鶏ガラスープ', 'マヨネーズ', 'ケチャップ', '味噌', 'みそ', 'バター',
+      'にんにく', '生姜', 'しょうが', '豆板醤', 'コチュジャン', 'オイスターソース', 'ウスターソース',
+      'めんつゆ', '白だし', '片栗粉', '小麦粉', '薄力粉', 'すりごま', 'いりごま', 'ラー油', 'ブラックペッパー'
+    ];
+
+    let currentSection = 'unknown'; // 'ingredients', 'seasonings', 'steps'
+
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+
+      // タイトル候補の検出
+      if (
+        (l.includes('【') && l.includes('】')) ||
+        l.startsWith('#') ||
+        l.includes('作り方') ||
+        l.includes('レシピ')
+      ) {
+        const cleanTitle = l.replace(/[【】#■◆★]/g, '').trim();
+        if (cleanTitle.length >= 3 && cleanTitle.length <= 35 && !title.includes(cleanTitle)) {
+          if (!cleanTitle.includes('材料') && !cleanTitle.includes('作り方') && !cleanTitle.includes('手順')) {
+            title = cleanTitle;
+          }
+        }
+      }
+
+      // セクション判定
+      if (l.includes('材料') || l.includes('食材')) {
+        currentSection = 'ingredients';
+        continue;
+      } else if (l.includes('調味料') || l.includes('合わせ調味料') || l.includes('タレ') || l.includes('ソース')) {
+        currentSection = 'seasonings';
+        continue;
+      } else if (l.includes('作り方') || l.includes('手順') || l.includes('工程') || l.includes('ステップ')) {
+        currentSection = 'steps';
+        continue;
+      }
+
+      const clean = l.replace(/^[・\-\*①②③④⑤⑥⑦⑧⑨⑩\d+\.、\)\s]/, '').trim();
+      if (!clean || clean.startsWith('http') || clean.includes('チャンネル登録') || clean.includes('Twitter') || clean.includes('Instagram')) {
+        continue;
+      }
+
+      // 手順判定
+      const isStepLike =
+        clean.match(/^(炒める|煮る|焼く|切る|混ぜる|火を|温める|茹でる|レンチン|電子レンジ|沸騰|フライパン|ボウル|鍋に|盛り付|粗熱|水気を|下味)/) ||
+        l.match(/^[0-9]+[\.、\)\s]/) ||
+        l.match(/^[①②③④⑤⑥⑦⑧⑨⑩]/) ||
+        currentSection === 'steps';
+
+      if (isStepLike && clean.length >= 6) {
+        stps.push(clean);
+        continue;
+      }
+
+      // 材料・調味料の分割（スペース、コロン、点など）
+      const parts = clean.split(/[\s:：\t…\.\-〜]+/);
+      const name = parts[0]?.trim();
+      const amount = parts.slice(1).join(' ').trim() || '適量';
+
+      if (!name || name.length > 25) continue;
+
+      const isSeasoning = seasoningKeywords.some((k) => name.includes(k) || amount.includes(k)) || currentSection === 'seasonings';
+
+      if (isSeasoning) {
+        seas.push({ name, amount });
+      } else {
+        ings.push({ name, amount });
+      }
+    }
+
+    return {
+      title: title || '新しいレシピ',
+      ingredients: ings.length > 0 ? ings : [{ name: 'メイン食材', amount: '適量' }],
+      seasonings: seas,
+      steps: stps.length > 0 ? stps : ['材料を切って火が通るまで加熱調理する']
+    };
+  };
+
+  // --- YouTube・TikTok・Web対応の完全解析ハンドラ ---
   const handleAnalyzeAiRecipe = async () => {
     const input = aiInput.trim();
     if (!input) return;
 
     setIsAiLoading(true);
-    let videoTitleHint = '';
+    setAiStatusMsg('動画・Webページの情報を取得中...');
 
-    // YouTube動画の場合、oEmbedからタイトルとチャンネル名を取得
-    if (input.includes('youtube.com') || input.includes('youtu.be')) {
+    let videoTitle = '';
+    let fetchedDescription = '';
+    const isUrl = input.startsWith('http://') || input.startsWith('https://');
+
+    if (isUrl) {
+      // 1. oEmbedで基本タイトルを取得
+      if (input.includes('youtube.com') || input.includes('youtu.be')) {
+        try {
+          const oembedUrl = 'https://noembed.com/embed?url=' + encodeURIComponent(input);
+          const res = await fetch(oembedUrl);
+          if (res.ok) {
+            const data = await res.json();
+            if (data && data.title) {
+              videoTitle = data.title.replace(/\s*by.*$/, '').replace(/【.*?】/g, (m) => m).trim();
+            }
+          }
+        } catch (e) {
+          // fallback
+        }
+      }
+
+      // 2. 無料Webリーダー（r.jina.ai）で動画概要欄・全文テキストを自動抽出
       try {
-        const oembedUrl = 'https://noembed.com/embed?url=' + encodeURIComponent(input);
-        const res = await fetch(oembedUrl);
+        setAiStatusMsg('概要欄と材料テキストを解析中...');
+        const readerUrl = 'https://r.jina.ai/' + input;
+        const res = await fetch(readerUrl, {
+          headers: { 'X-No-Cache': 'true' }
+        });
         if (res.ok) {
-          const data = await res.json();
-          if (data && data.title) {
-            videoTitleHint = data.title + (data.author_name ? ' by ' + data.author_name : '');
+          const text = await res.text();
+          if (text && text.length > 50) {
+            fetchedDescription = text;
           }
         }
-      } catch (e) {
-        // oembed fallback
+      } catch (err) {
+        console.warn('Reader proxy note:', err);
       }
     }
 
-    const apiKey = "";
-    const apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=' + apiKey;
+    const textToAnalyze = (fetchedDescription ? fetchedDescription + '\n' : '') + input;
 
-    const systemPrompt = "あなたは家庭料理のプロフェッショナルです。提供された動画URL、タイトル、概要欄、またはレシピテキストから【料理名】【食材リスト（分量付き）】【調味料リスト（分量付き）】【調理工程（番号付きステップ）】を正確に抽出してください。" +
-      "重要ルール:\n" +
-      "1. 食材（肉、魚、野菜、卵、豆腐など）と調味料（醤油、酒、みりん、塩、油など）を厳格に分類してください。\n" +
-      "2. 分量は「大さじ1」「200g」「少々」「1/2個」など記載がある限り正確に添えてください。不明なら「適量」と記してください。\n" +
-      "3. 作り方手順は、下ごしらえ・加熱・味付け・盛り付けの流れが分かるように簡潔で明確な箇条書きにしてください。\n" +
-      "4. 必ず以下の形式の純粋なJSONのみを出力してください。マークダウンや余計な解説は不要です。\n" +
-      "{\n" +
-      "  \"title\": \"料理名\",\n" +
-      "  \"ingredients\": [{\"name\": \"豚バラ肉\", \"amount\": \"200g\"}],\n" +
-      "  \"seasonings\": [{\"name\": \"醤油\", \"amount\": \"大さじ2\"}],\n" +
-      "  \"steps\": [\"手順1\", \"手順2\"]\n" +
-      "}";
+    // 3. Gemini APIキーがある場合は高度AI生成を試みる
+    let aiParsedJson = null;
+    const activeKey = userGeminiKey.trim();
 
-    const userPrompt = "以下の情報からレシピの材料・調味料・手順を詳細に抽出してください。\n" +
-      (videoTitleHint ? "【動画タイトル】: " + videoTitleHint + "\n" : "") +
-      "【入力内容】:\n" + input + "\n\n" +
-      "もしURLだけが入力されている場合は、Web検索ツールを活用してその動画の概要欄や公式レシピ、字幕・調理内容を検索し、食材・調味料・手順を省略せずに復元してください。";
+    if (activeKey) {
+      setAiStatusMsg('AIがレシピと材料を整理中...');
+      const apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + activeKey;
 
-    const payload = {
-      contents: [{ parts: [{ text: userPrompt }] }],
-      tools: [{ "google_search": {} }],
-      systemInstruction: { parts: [{ text: systemPrompt }] }
-    };
+      const systemPrompt = "提供されたレシピ情報から【料理名】【食材リスト（分量付き）】【調味料リスト（分量付き）】【調理工程（番号付き）】を抽出し、以下の純粋なJSONのみを出力してください。\n" +
+        "{\n" +
+        "  \"title\": \"料理名\",\n" +
+        "  \"ingredients\": [{\"name\": \"豚バラ肉\", \"amount\": \"200g\"}],\n" +
+        "  \"seasonings\": [{\"name\": \"醤油\", \"amount\": \"大さじ2\"}],\n" +
+        "  \"steps\": [\"手順1\", \"手順2\"]\n" +
+        "}";
 
-    let resultJson = null;
-    const delays = [1000, 2000, 4000];
+      const payload = {
+        contents: [{ parts: [{ text: "以下のテキストからレシピ情報を抽出してください:\n\n" + textToAnalyze.slice(0, 4000) }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: { responseMimeType: "application/json" }
+      };
 
-    for (let i = 0; i <= delays.length; i++) {
       try {
         const response = await fetch(apiUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
-
         if (response.ok) {
-          const resData = await response.json();
-          const text = resData.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text) {
-            // JSONブロックの抽出
-            const match = text.match(/\{[\s\S]*\}/);
-            if (match) {
-              resultJson = JSON.parse(match[0]);
-              if (resultJson && resultJson.title && (resultJson.ingredients?.length > 0 || resultJson.steps?.length > 0)) {
-                break;
-              }
+          const data = await response.json();
+          const raw = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.title) {
+              aiParsedJson = parsed;
             }
           }
         }
-      } catch (err) {
-        console.warn('API attempt failed:', err);
-      }
-      if (i < delays.length) {
-        await new Promise((r) => setTimeout(r, delays[i]));
+      } catch (e) {
+        console.warn('Gemini API note:', e);
       }
     }
 
-    // 高度フォールバック: テキストや概要欄から賢く食材・調味料・手順を解析
-    if (!resultJson || !resultJson.title || (!resultJson.ingredients?.length && !resultJson.steps?.length)) {
-      const lines = input.split('\n').map((l) => l.trim()).filter(Boolean);
-      let detectedTitle = videoTitleHint ? videoTitleHint.replace(/\s*by.*$/, '') : '新しいレシピ';
-      const ings = [];
-      const seas = [];
-      const stps = [];
-
-      const seasoningKeywords = ['醤油', 'しょうゆ', 'みりん', '酒', '塩', '胡椒', 'こしょう', '砂糖', '油', 'ごま油', 'オリーブオイル', '酢', '大さじ', '小さじ', '顆粒', 'コンソメ', 'ほんだし', 'マヨネーズ', 'ケチャップ', '味噌', 'みそ', 'バター', 'にんにく', '生姜', 'しょうが'];
-
-      lines.forEach((l) => {
-        const clean = l.replace(/^[・\-\*①②③④⑤⑥⑦⑧⑨⑩\d+\.\s]/, '').trim();
-        if (!clean) return;
-
-        if ((l.indexOf('【') !== -1 && l.indexOf('】') !== -1) || l.startsWith('#') || l.includes('作り方') || l.includes('レシピ')) {
-          if (l.replace(/[【】#]/g, '').trim().length < 30) {
-            detectedTitle = l.replace(/[【】#]/g, '').trim();
-          }
-        } else if (seasoningKeywords.some((k) => clean.includes(k))) {
-          // 調味料と判定
-          const parts = clean.split(/[\s:：\t]+/);
-          seas.push({ name: parts[0], amount: parts.slice(1).join(' ') || '適量' });
-        } else if (clean.match(/^(炒める|煮る|焼く|切る|混ぜる|火を|温める|茹でる|レンチン|電子レンジ|沸騰)/) || l.match(/^[0-9]+[\.、\)\s]/)) {
-          // 手順と判定
-          stps.push(clean);
-        } else if (!clean.startsWith('http') && clean.length < 40) {
-          // 食材と判定
-          const parts = clean.split(/[\s:：\t]+/);
-          ings.push({ name: parts[0], amount: parts.slice(1).join(' ') || '適量' });
-        }
-      });
-
-      resultJson = {
-        title: detectedTitle || 'レシピメモ',
-        ingredients: ings.length > 0 ? ings : [{ name: 'メイン食材', amount: '適量' }],
-        seasonings: seas,
-        steps: stps.length > 0 ? stps : ['材料を切って火が通るまで加熱調理する']
-      };
-    }
+    // 4. AI解析が未実行または失敗時は、高性能レシピ抽出エンジンで即座に復元
+    const finalResult = aiParsedJson || parseRecipeTextDetailed(textToAnalyze, videoTitle || 'YouTubeレシピ');
 
     setIsAiLoading(false);
+    setAiStatusMsg('');
 
     setPreviewRecipe({
       id: 'r_' + String(Date.now()),
-      title: resultJson.title || '新しいレシピ',
+      title: finalResult.title || videoTitle || '新しいレシピ',
       author: '共通',
-      sourceUrl: input.startsWith('http') ? input : '',
-      ingredients: Array.isArray(resultJson.ingredients) ? resultJson.ingredients : [],
-      seasonings: Array.isArray(resultJson.seasonings) ? resultJson.seasonings : [],
-      steps: Array.isArray(resultJson.steps) ? resultJson.steps : []
+      sourceUrl: isUrl ? input : '',
+      ingredients: Array.isArray(finalResult.ingredients) ? finalResult.ingredients : [],
+      seasonings: Array.isArray(finalResult.seasonings) ? finalResult.seasonings : [],
+      steps: Array.isArray(finalResult.steps) ? finalResult.steps : []
     });
 
     setOpenAiModal(false);
@@ -556,6 +618,14 @@ export default function App() {
     }
   };
 
+  const handleSaveApiKey = () => {
+    const k = tempApiKey.trim();
+    setUserGeminiKey(k);
+    saveLocal('g_key', k);
+    setOpenApiKeyModal(false);
+    showToast(k ? 'Gemini APIキーを保存しました' : 'APIキーを解除しました');
+  };
+
   return (
     <div className="min-h-screen bg-slate-100 flex justify-center items-start text-slate-800 font-sans">
       <div className="w-full max-w-md bg-white min-h-screen shadow-lg flex flex-col relative pb-20 select-none">
@@ -593,7 +663,7 @@ export default function App() {
         {/* メインコンテンツ */}
         <main className="flex-1 p-3 overflow-y-auto">
 
-          {}
+          {/* タブ1: スケジュール */}
           {tab === 'schedule' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-xs">
@@ -618,7 +688,6 @@ export default function App() {
 
               {calMode === 'month' ? (
                 <>
-                  {/* カレンダー（連日バー対応） */}
                   <div className="bg-white border border-slate-200 rounded-xl p-2 shadow-xs">
                     <div className="grid grid-cols-7 text-center text-[11px] font-semibold text-slate-400 py-1 border-b border-slate-100">
                       <span className="text-rose-500">日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span className="text-blue-500">土</span>
@@ -632,8 +701,6 @@ export default function App() {
                         const dStr = cYear + '-' + String(cMonth + 1).padStart(2, '0') + '-' + String(dayNum).padStart(2, '0');
                         const isSel = dStr === selDate;
                         const isTod = dStr === todayStr;
-                        
-                        // その日にかかっている予定（連日含む）
                         const evs = scheds.filter((s) => dStr >= s.startDate && dStr <= (s.endDate || s.startDate));
                         
                         const cellBoxClass = 'min-h-[58px] p-0.5 rounded-lg flex flex-col items-stretch border cursor-pointer transition ' + 
@@ -679,7 +746,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* 選択日の予定詳細リスト */}
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
@@ -737,7 +803,6 @@ export default function App() {
                   </div>
                 </>
               ) : (
-                /* 一覧表示 */
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-slate-700">全スケジュール ({scheds.length}件)</span>
@@ -781,7 +846,7 @@ export default function App() {
             </div>
           )}
 
-          {}
+          {/* タブ2: 買い出しToDo */}
           {tab === 'todo' && (
             <div className="space-y-3">
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
@@ -846,7 +911,7 @@ export default function App() {
             </div>
           )}
 
-          {}
+          {/* タブ3: レシピ帳 */}
           {tab === 'recipe' && (
             <div className="space-y-3">
               <div className="flex gap-2">
@@ -860,6 +925,9 @@ export default function App() {
                     <span className="absolute -top-1 -right-1 bg-amber-500 text-white text-[9px] w-4 h-4 rounded-full font-bold flex items-center justify-center">{trash.length}</span>
                   </button>
                 )}
+                <button onClick={() => { setTempApiKey(userGeminiKey); setOpenApiKeyModal(true); }} title="AI設定" className="p-2 bg-white border border-slate-200 rounded-xl text-slate-600 shrink-0">
+                  <Key className="w-4 h-4" />
+                </button>
               </div>
 
               {/* AIレシピ自動抽出ボタン */}
@@ -868,7 +936,7 @@ export default function App() {
                   <Sparkles className="w-5 h-5 text-amber-300 shrink-0" />
                   <div>
                     <div className="text-sm">動画URL・概要欄からレシピ自動解析</div>
-                    <div className="text-[11px] text-slate-300 font-normal">YouTube/TikTokの材料・調味料・手順をAIが完全整理</div>
+                    <div className="text-[11px] text-slate-300 font-normal">YouTube/TikTokの材料・調味料・手順を完全自動整理</div>
                   </div>
                 </div>
                 <Plus className="w-4 h-4 text-slate-400" />
@@ -1011,25 +1079,25 @@ export default function App() {
           )}
         </main>
 
-        {}
+        {/* モーダル: AIレシピ抽出 */}
         {openAiModal && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
               <div className="flex justify-between items-center pb-2 border-b">
                 <div className="flex items-center gap-1.5">
                   <Sparkles className="w-4 h-4 text-amber-500" />
-                  <h3 className="font-bold text-sm text-slate-800">動画URL・概要欄からレシピ解析</h3>
+                  <h3 className="font-bold text-sm text-slate-800">動画URL・概要欄からレシピ自動解析</h3>
                 </div>
                 <button onClick={() => setOpenAiModal(false)}><X className="w-5 h-5 text-slate-400" /></button>
               </div>
 
               <div className="space-y-2">
                 <p className="text-[11px] text-slate-500 leading-relaxed">
-                  YouTube / TikTok の動画URL、または概要欄テキストを貼り付けてください。AIが料理名・食材・調味料・手順を自動抽出します。
+                  YouTubeのURL（または概要欄のテキスト）を貼り付けるだけで、概要欄の食材・調味料・手順を自動で取得・分解します。
                 </p>
                 <textarea
                   rows={6}
-                  placeholder={'例: https://youtu.be/...\nまたは概要欄のテキスト（豚バラ 200g、醤油 大さじ2、フライパンで両面を焼く...）'}
+                  placeholder={'https://youtu.be/...\nまたは概要欄のテキストを貼り付け'}
                   value={aiInput}
                   onChange={(e) => setAiInput(e.target.value)}
                   className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none focus:border-slate-800"
@@ -1042,7 +1110,7 @@ export default function App() {
                   {isAiLoading ? (
                     <>
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>動画・テキストからレシピを解析中...</span>
+                      <span>{aiStatusMsg || 'レシピを解析中...'}</span>
                     </>
                   ) : (
                     <>
@@ -1056,7 +1124,7 @@ export default function App() {
           </div>
         )}
 
-        {}
+        {/* モーダル: プレビュー＆手動修正 */}
         {previewRecipe && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3 max-h-[85vh] overflow-y-auto">
@@ -1165,7 +1233,7 @@ export default function App() {
           </div>
         )}
 
-        {}
+        {/* モーダル: レシピ編集 */}
         {editingRecipe && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -1214,7 +1282,7 @@ export default function App() {
           </div>
         )}
 
-        {}
+        {/* モーダル: 予定追加 */}
         {openAddSched && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -1232,7 +1300,6 @@ export default function App() {
                 </div>
                 <input type="text" required placeholder="予定名（北海道旅行、帰省、お迎えなど）" value={sTitle} onChange={(e) => setSTitle(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
                 
-                {/* 宿泊・期間選択 */}
                 <div className="space-y-1">
                   <div className="flex justify-between items-center">
                     <span className="text-[11px] font-bold text-slate-600">日程（連日・宿泊に対応）</span>
@@ -1279,7 +1346,7 @@ export default function App() {
           </div>
         )}
 
-        {}
+        {/* モーダル: 買うもの追加 */}
         {openAddTodo && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -1302,7 +1369,7 @@ export default function App() {
           </div>
         )}
 
-        {}
+        {/* モーダル: ゴミ箱 */}
         {openTrash && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -1323,6 +1390,35 @@ export default function App() {
                     </div>
                   ))
                 )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* モーダル: AIキー任意設定 */}
+        {openApiKeyModal && (
+          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+            <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
+              <div className="flex justify-between items-center pb-2 border-b">
+                <div className="flex items-center gap-1.5">
+                  <Key className="w-4 h-4 text-amber-500" />
+                  <h3 className="font-bold text-sm">Gemini APIキー設定（任意）</h3>
+                </div>
+                <button onClick={() => setOpenApiKeyModal(false)}><X className="w-5 h-5 text-slate-400" /></button>
+              </div>
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                Google AI Studioの無料APIキーを入力すると、より高度なAI要約が有効になります。空欄のままでも概要欄の自動抽出エンジンが動作します。
+              </p>
+              <input
+                type="password"
+                placeholder="AIzaSy...（未入力でも動作します）"
+                value={tempApiKey}
+                onChange={(e) => setTempApiKey(e.target.value)}
+                className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none"
+              />
+              <div className="flex gap-2 pt-1">
+                <button onClick={() => { setTempApiKey(''); }} className="px-3 py-2 border rounded-lg text-xs text-slate-500">クリア</button>
+                <button onClick={handleSaveApiKey} className="flex-1 bg-slate-900 text-white font-bold py-2 rounded-lg text-xs">設定を保存</button>
               </div>
             </div>
           </div>
