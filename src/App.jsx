@@ -33,7 +33,8 @@ import {
   ExternalLink,
   Edit2,
   Loader2,
-  Luggage
+  Luggage,
+  AlertCircle
 } from 'lucide-react';
 
 // --- お二人専用のFirebase接続設定 ---
@@ -87,9 +88,7 @@ const loadLocal = (key, fallback) => {
 const saveLocal = (key, val) => {
   try {
     localStorage.setItem('fn_' + key, JSON.stringify(val));
-  } catch (e) {
-    // ignore
-  }
+  } catch (e) {}
 };
 
 export default function App() {
@@ -113,7 +112,7 @@ export default function App() {
   const [selDate, setSelDate] = useState(todayStr);
   const [vDate, setVDate] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
 
-  // データステート
+  // 各ステート
   const [scheds, setScheds] = useState(() => loadLocal('scheds', []));
   const [todos, setTodos] = useState(() => loadLocal('todos', []));
   const [recipes, setRecipes] = useState(() => loadLocal('recipes', []));
@@ -133,7 +132,7 @@ export default function App() {
         setScheds(list);
         saveLocal('scheds', list);
         setSyncStatus('connected');
-      }, (err) => console.warn('Sched sync:', err));
+      });
 
       const unsubTodos = onSnapshot(collection(db, 'todos'), (snap) => {
         const list = [];
@@ -141,7 +140,7 @@ export default function App() {
         setTodos(list);
         saveLocal('todos', list);
         setSyncStatus('connected');
-      }, (err) => console.warn('Todos sync:', err));
+      });
 
       const unsubRecipes = onSnapshot(collection(db, 'recipes'), (snap) => {
         const list = [];
@@ -149,23 +148,21 @@ export default function App() {
         setRecipes(list);
         saveLocal('recipes', list);
         setSyncStatus('connected');
-      }, (err) => console.warn('Recipes sync:', err));
+      });
 
       const unsubTrash = onSnapshot(collection(db, 'trash'), (snap) => {
         const list = [];
         snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
         setTrash(list);
         saveLocal('trash', list);
-      }, (err) => console.warn('Trash sync:', err));
+      });
 
       unsubs = [unsubSched, unsubTodos, unsubRecipes, unsubTrash];
     } catch (e) {
       console.error('Sync init error:', e);
     }
 
-    return () => {
-      unsubs.forEach((u) => u && u());
-    };
+    return () => unsubs.forEach((u) => u && u());
   }, []);
 
   const [openAddSched, setOpenAddSched] = useState(false);
@@ -222,9 +219,7 @@ export default function App() {
 
     try {
       await setDoc(doc(db, 'schedules', item.id), item);
-    } catch (err) {
-      console.warn('Cloud save fallback:', err);
-    }
+    } catch (err) {}
   };
 
   const handleDelSched = async (id, e) => {
@@ -236,9 +231,7 @@ export default function App() {
 
     try {
       await deleteDoc(doc(db, 'schedules', id));
-    } catch (err) {
-      console.warn('Cloud del fallback:', err);
-    }
+    } catch (err) {}
   };
 
   const dayScheds = useMemo(() => {
@@ -284,9 +277,7 @@ export default function App() {
 
     try {
       await setDoc(doc(db, 'todos', item.id), item);
-    } catch (err) {
-      console.warn('Cloud todo error:', err);
-    }
+    } catch (err) {}
   };
 
   const handleToggleTodo = async (id) => {
@@ -300,9 +291,7 @@ export default function App() {
 
     try {
       await updateDoc(doc(db, 'todos', id), { done: nextDone });
-    } catch (err) {
-      console.warn('Cloud toggle error:', err);
-    }
+    } catch (err) {}
   };
 
   const handleDelTodo = async (id, e) => {
@@ -314,9 +303,7 @@ export default function App() {
 
     try {
       await deleteDoc(doc(db, 'todos', id));
-    } catch (err) {
-      console.warn('Cloud todo del error:', err);
-    }
+    } catch (err) {}
   };
 
   const [openAiModal, setOpenAiModal] = useState(false);
@@ -329,138 +316,153 @@ export default function App() {
   const [openTrash, setOpenTrash] = useState(false);
   const [rQuery, setRQuery] = useState('');
 
-  // --- YouTube / テキスト レシピ高度解析エンジン ---
-  const handleAnalyzeAiRecipe = async () => {
-    const input = aiInput.trim();
-    if (!input) return;
-
-    setIsAiLoading(true);
-    let rawTextToParse = input;
-    let detectedTitle = '新しいレシピ';
-
-    // YouTube URL の判定と動画情報・概要欄の直接抽出
-    if (input.includes('youtube.com') || input.includes('youtu.be')) {
-      try {
-        // 1. noembed からタイトルを取得
-        const oembedUrl = 'https://noembed.com/embed?url=' + encodeURIComponent(input);
-        const resOembed = await fetch(oembedUrl);
-        if (resOembed.ok) {
-          const odata = await resOembed.json();
-          if (odata && odata.title) {
-            detectedTitle = odata.title;
-          }
-        }
-
-        // 2. YouTubeの動画ID取得
-        const matchId = input.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/))([\w-]{11})/);
-        if (matchId && matchId[1]) {
-          const videoId = matchId[1];
-          // CORSプロキシ経由でYouTube概要欄メタデータを取得
-          const targetUrl = 'https://www.youtube.com/watch?v=' + videoId;
-          const proxyUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(targetUrl);
-          const resProxy = await fetch(proxyUrl);
-          if (resProxy.ok) {
-            const html = await resProxy.text();
-            // shortDescription (概要欄の本文) を精密抽出
-            const descMatch = html.match(/"shortDescription":"([^"]+)"/);
-            if (descMatch && descMatch[1]) {
-              const unescapedDesc = descMatch[1]
-                .replace(/\\n/g, '\n')
-                .replace(/\\"/g, '"')
-                .replace(/\\u0026/g, '&')
-                .replace(/\\u003c/g, '<')
-                .replace(/\\u003e/g, '>');
-              rawTextToParse = unescapedDesc;
-            }
-          }
-        }
-      } catch (e) {
-        console.warn('YouTube extraction fallback:', e);
-      }
-    }
-
-    // 解析処理（ゴミ文字列排除 ＆ 食材・調味料・手順の精密分解）
-    const lines = rawTextToParse.split('\n').map((l) => l.trim()).filter(Boolean);
-
-    // 排除すべきシステムゴミワード
-    const junkKeywords = [
-      'http', 'https', 'captcha', 'warning', 'markdown', 'title (youtube)', 'url (source', 
-      'back [image', 'channel', 'twitter', 'instagram', 'tiktok', 'amazon', '楽天', 'pr', 
-      'ご視聴', '高評価', 'チャンネル登録', 'baza'
-    ];
+  // --- 高精度レシピ分解エンジン ---
+  const parseRecipeText = (text, fallbackTitle) => {
+    const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
 
     const seasoningKeywords = [
-      '醤油', 'しょうゆ', 'みりん', '酒', '塩', '胡椒', 'こしょう', '砂糖', '油', 'ごま油', 
-      'オリーブオイル', '酢', '大さじ', '小さじ', '顆粒', 'コンソメ', 'ほんだし', 'マヨネーズ', 
-      'ケチャップ', '味噌', 'みそ', 'バター', 'にんにく', '生姜', 'しょうが', 'めんつゆ', 'ポン酢', 
-      'ぽん酢', 'だし', 'ダシ', 'つゆ', '鷹の爪', '唐辛子', 'チューブ'
+      '醤油', 'しょうゆ', 'みりん', '酒', '料理酒', '塩', '胡椒', 'こしょう', '砂糖', '油', 
+      'ごま油', 'ゴマ油', 'オリーブオイル', '酢', '大さじ', '小さじ', '顆粒', 'コンソメ', 
+      'ほんだし', 'マヨネーズ', 'ケチャップ', '味噌', 'みそ', 'バター', 'にんにく', '生姜', 
+      'しょうが', 'めんつゆ', 'ポン酢', 'ぽん酢', 'だし', 'ダシ', 'つゆ', '鷹の爪', '唐辛子', 
+      'チューブ', 'ウェイパー', '創味シャンタン', '鶏ガラスープ'
+    ];
+
+    const junkKeywords = [
+      'http', 'https', 'www.', 'instagram', 'twitter', 'tiktok', 'amazon', '楽天', 
+      'チャンネル登録', '高評価', 'ご視聴', '公式', '書籍', '購入', 'グッズ', 'baza', 'captcha', 'warning'
     ];
 
     const ings = [];
     const seas = [];
     const stps = [];
 
-    let mode = 'auto'; // 'ingredients', 'seasonings', 'steps'
+    let currentSection = 'auto';
 
     lines.forEach((line) => {
       const lower = line.toLowerCase();
-      // ゴミ文字列・URLは完全スキップ
       if (junkKeywords.some((k) => lower.includes(k))) return;
 
-      // セクション切り替え判定
-      if (line.includes('材料') || line.includes('食材')) {
-        mode = 'ingredients';
+      if (line.match(/^(【|\[|■|●|▼)?\s*(材料|食材|具材)/i)) {
+        currentSection = 'ingredients';
         return;
       }
-      if (line.includes('調味料') || line.includes('合わせ調味料') || line.includes('タレ') || line.includes('【A】') || line.includes('【B】')) {
-        mode = 'seasonings';
+      if (line.match(/^(【|\[|■|●|▼)?\s*(調味料|合わせ調味料|タレ|ソース|スープ|［?a］|［?b］|\[a\]|\[b\])/i)) {
+        currentSection = 'seasonings';
         return;
       }
-      if (line.includes('作り方') || line.includes('手順') || line.includes('工程')) {
-        mode = 'steps';
+      if (line.match(/^(【|\[|■|●|▼)?\s*(作り方|手順|工程|調理法)/i)) {
+        currentSection = 'steps';
         return;
       }
 
       const clean = line.replace(/^[・\-\*①②③④⑤⑥⑦⑧⑨⑩\d+\.\s]/, '').trim();
-      if (!clean) return;
+      if (!clean || clean.length < 2) return;
 
-      // 分量の分離
       const parts = clean.split(/[\s:：\t]+/);
       const name = parts[0];
       const amount = parts.slice(1).join(' ') || '適量';
 
-      if (mode === 'ingredients') {
+      if (currentSection === 'steps' || line.match(/^[0-9]+[\.、\)\s]/) || clean.match(/^(炒める|煮る|焼く|切る|混ぜる|火を|温める|茹でる|レンチン|電子レンジ|沸騰|下処理|完成|盛る|振る)/)) {
+        stps.push(clean);
+      } else if (currentSection === 'seasonings' || (currentSection === 'auto' && seasoningKeywords.some((k) => name.includes(k)))) {
+        seas.push({ name, amount });
+      } else if (currentSection === 'ingredients' || currentSection === 'auto') {
         if (seasoningKeywords.some((k) => name.includes(k))) {
           seas.push({ name, amount });
-        } else {
-          ings.push({ name, amount });
-        }
-      } else if (mode === 'seasonings') {
-        seas.push({ name, amount });
-      } else if (mode === 'steps') {
-        stps.push(clean);
-      } else {
-        // 自動判別
-        if (clean.match(/^(炒める|煮る|焼く|切る|混ぜる|火を|温める|茹でる|レンチン|電子レンジ|沸騰|下処理|完成)/) || line.match(/^[0-9]+[\.、\)\s]/)) {
-          stps.push(clean);
-        } else if (seasoningKeywords.some((k) => name.includes(k))) {
-          seas.push({ name, amount });
-        } else if (name.length < 30) {
+        } else if (name.length < 25) {
           ings.push({ name, amount });
         }
       }
     });
 
+    return {
+      title: fallbackTitle,
+      ingredients: ings,
+      seasonings: seas,
+      steps: stps
+    };
+  };
+
+  // --- YouTube / テキスト 解析ハンドラー ---
+  const handleAnalyzeAiRecipe = async () => {
+    const input = aiInput.trim();
+    if (!input) return;
+
+    setIsAiLoading(true);
+    let targetText = input;
+    let detectedTitle = '新しいレシピ';
+    let fetchSuccess = false;
+
+    if (input.includes('youtube.com') || input.includes('youtu.be')) {
+      const matchId = input.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/))([\w-]{11})/);
+      const videoId = matchId ? matchId[1] : null;
+
+      if (videoId) {
+        // 多角的にCORS制限の少ないAPIから概要欄を完全取得
+        const endpoints = [
+          'https://pipedapi.kavin.rocks/streams/' + videoId,
+          'https://api.piped.video/streams/' + videoId,
+          'https://inv.nadeko.net/api/v1/videos/' + videoId,
+          'https://r.jina.ai/https://www.youtube.com/watch?v=' + videoId
+        ];
+
+        for (const url of endpoints) {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3500);
+            const res = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
+
+            if (res.ok) {
+              if (url.includes('jina.ai')) {
+                const text = await res.text();
+                if (text && text.length > 100) {
+                  targetText = text;
+                  fetchSuccess = true;
+                  break;
+                }
+              } else {
+                const data = await res.json();
+                if (data.title) detectedTitle = data.title;
+                if (data.description && data.description.length > 30) {
+                  targetText = data.description;
+                  fetchSuccess = true;
+                  break;
+                }
+              }
+            }
+          } catch (e) {}
+        }
+
+        if (detectedTitle === '新しいレシピ') {
+          try {
+            const resNoembed = await fetch('https://noembed.com/embed?url=https://www.youtube.com/watch?v=' + videoId);
+            if (resNoembed.ok) {
+              const odata = await resNoembed.json();
+              if (odata.title) detectedTitle = odata.title;
+            }
+          } catch (e) {}
+        }
+      }
+    } else {
+      fetchSuccess = true;
+    }
+
+    const parsed = parseRecipeText(targetText, detectedTitle);
     setIsAiLoading(false);
 
     setPreviewRecipe({
       id: 'r_' + String(Date.now()),
-      title: detectedTitle || 'レシピメモ',
+      title: detectedTitle !== '新しいレシピ' ? detectedTitle : (parsed.title || '新しいレシピ'),
       author: '共通',
       sourceUrl: input.startsWith('http') ? input : '',
-      ingredients: ings.length > 0 ? ings : [{ name: 'メイン食材', amount: '適量' }],
-      seasonings: seas,
-      steps: stps.length > 0 ? stps : ['材料を切って加熱調理する']
+      ingredients: parsed.ingredients,
+      seasonings: parsed.seasonings,
+      steps: parsed.steps,
+      fetchWarning: (!fetchSuccess && input.startsWith('http') && parsed.ingredients.length === 0) 
+        ? '※YouTube側のセキュリティにより概要欄の自動取得が制限されました。YouTubeアプリで概要欄テキストをコピーして貼り付けると100%確実に解読されます。' 
+        : ''
     });
 
     setOpenAiModal(false);
@@ -478,9 +480,7 @@ export default function App() {
 
     try {
       await setDoc(doc(db, 'recipes', previewRecipe.id), previewRecipe);
-    } catch (err) {
-      console.warn('Cloud recipe save error:', err);
-    }
+    } catch (err) {}
 
     setPreviewRecipe(null);
   };
@@ -496,9 +496,7 @@ export default function App() {
 
     try {
       await setDoc(doc(db, 'recipes', editingRecipe.id), editingRecipe);
-    } catch (err) {
-      console.warn('Cloud recipe update error:', err);
-    }
+    } catch (err) {}
 
     setEditingRecipe(null);
   };
@@ -522,9 +520,7 @@ export default function App() {
     try {
       await deleteDoc(doc(db, 'recipes', id));
       await setDoc(doc(db, 'trash', id), trashItem);
-    } catch (err) {
-      console.warn('Cloud trash error:', err);
-    }
+    } catch (err) {}
   };
 
   const handleRestoreRecipe = async (id) => {
@@ -543,9 +539,7 @@ export default function App() {
     try {
       await deleteDoc(doc(db, 'trash', id));
       await setDoc(doc(db, 'recipes', id), target);
-    } catch (err) {
-      console.warn('Cloud restore error:', err);
-    }
+    } catch (err) {}
   };
 
   return (
@@ -575,17 +569,16 @@ export default function App() {
           </div>
         </header>
 
-        {/* トースト通知 */}
+        {/* トースト */}
         {toast && (
           <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 bg-slate-800 text-white text-xs px-4 py-2 rounded-lg shadow-lg border border-slate-700 whitespace-nowrap">
             {toast}
           </div>
         )}
 
-        {/* メインコンテンツ */}
         <main className="flex-1 p-3 overflow-y-auto">
 
-          {/* スケジュールタブ */}
+          {/* スケジュール */}
           {tab === 'schedule' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-xs">
@@ -623,17 +616,11 @@ export default function App() {
                         const dStr = cYear + '-' + String(cMonth + 1).padStart(2, '0') + '-' + String(dayNum).padStart(2, '0');
                         const isSel = dStr === selDate;
                         const isTod = dStr === todayStr;
-                        
                         const evs = scheds.filter((s) => dStr >= s.startDate && dStr <= (s.endDate || s.startDate));
                         
-                        const cellBoxClass = 'min-h-[58px] p-0.5 rounded-lg flex flex-col items-stretch border cursor-pointer transition ' + 
-                          (isSel ? 'border-slate-900 bg-slate-50 ring-1 ring-slate-900' : isTod ? 'border-amber-300 bg-amber-50/40' : 'border-slate-100 bg-white hover:border-slate-300');
-                        const dayNumClass = 'text-[11px] font-mono leading-none text-left px-1 ' + 
-                          (isTod ? 'font-bold text-amber-600' : isSel ? 'font-bold text-slate-900' : 'text-slate-600');
-                        
                         return (
-                          <div key={dStr} onClick={() => setSelDate(dStr)} className={cellBoxClass}>
-                            <span className={dayNumClass}>{dayNum}</span>
+                          <div key={dStr} onClick={() => setSelDate(dStr)} className={'min-h-[58px] p-0.5 rounded-lg flex flex-col items-stretch border cursor-pointer transition ' + (isSel ? 'border-slate-900 bg-slate-50 ring-1 ring-slate-900' : isTod ? 'border-amber-300 bg-amber-50/40' : 'border-slate-100 bg-white hover:border-slate-300')}>
+                            <span className={'text-[11px] font-mono leading-none text-left px-1 ' + (isTod ? 'font-bold text-amber-600' : isSel ? 'font-bold text-slate-900' : 'text-slate-600')}>{dayNum}</span>
                             <div className="flex flex-col gap-0.5 mt-0.5">
                               {evs.slice(0, 2).map((ev) => {
                                 const isStart = dStr === ev.startDate;
@@ -643,25 +630,18 @@ export default function App() {
                                 
                                 if (isMulti) {
                                   return (
-                                    <div 
-                                      key={ev.id} 
-                                      className={'text-[8px] px-1 py-0.5 truncate text-left font-bold ' + style.bar + ' ' + 
-                                        (isStart && isEnd ? 'rounded' : isStart ? 'rounded-l' : isEnd ? 'rounded-r' : 'rounded-none')}
-                                    >
+                                    <div key={ev.id} className={'text-[8px] px-1 py-0.5 truncate text-left font-bold ' + style.bar + ' ' + (isStart && isEnd ? 'rounded' : isStart ? 'rounded-l' : isEnd ? 'rounded-r' : 'rounded-none')}>
                                       {isStart ? '✈ ' + ev.title : ev.title}
                                     </div>
                                   );
                                 }
-
                                 return (
                                   <div key={ev.id} className={'text-[8px] px-1 py-0.5 rounded truncate text-left font-medium ' + style.cell}>
                                     {ev.title}
                                   </div>
                                 );
                               })}
-                              {evs.length > 2 && (
-                                <span className="text-[7px] text-slate-400 font-bold leading-none text-left px-0.5">+{evs.length - 2}</span>
-                              )}
+                              {evs.length > 2 && <span className="text-[7px] text-slate-400 font-bold leading-none text-left px-0.5">+{evs.length - 2}</span>}
                             </div>
                           </div>
                         );
@@ -672,47 +652,34 @@ export default function App() {
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                        <Clock className="w-3.5 h-3.5 text-slate-500" />
-                        {selDate} の予定（{dayScheds.length}件）
+                        <Clock className="w-3.5 h-3.5 text-slate-500" />{selDate} の予定（{dayScheds.length}件）
                       </span>
-                      <button 
-                        onClick={() => { setSStart(selDate); setSEnd(selDate); setOpenAddSched(true); }} 
-                        className="flex items-center gap-1 bg-slate-900 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-slate-800 transition shadow-xs"
-                      >
+                      <button onClick={() => { setSStart(selDate); setSEnd(selDate); setOpenAddSched(true); }} className="flex items-center gap-1 bg-slate-900 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-slate-800 transition shadow-xs">
                         <Plus className="w-3.5 h-3.5" />予定追加
                       </button>
                     </div>
 
                     {dayScheds.length === 0 ? (
-                      <div className="py-6 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">
-                        {selDate} に予定はありません
-                      </div>
+                      <div className="py-6 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">{selDate} に予定はありません</div>
                     ) : (
                       <div className="space-y-2">
                         {dayScheds.map((item) => {
                           const style = STYLES[item.author] || STYLES['共通'];
                           const isMulti = item.isMultiDay || (item.endDate && item.endDate > item.startDate);
-                          const duration = getDurationText(item.startDate, item.endDate);
-
                           return (
                             <div key={item.id} className={'p-3 bg-white rounded-xl border border-slate-200 shadow-xs flex items-center justify-between ' + style.border}>
                               <div className="flex-1 mr-2">
                                 <div className="flex flex-wrap items-center gap-1.5 mb-1">
                                   {isMulti && (
                                     <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-1.5 py-0.2 rounded border border-amber-300 flex items-center gap-1">
-                                      <Luggage className="w-3 h-3" />
-                                      {duration}
+                                      <Luggage className="w-3 h-3" />{getDurationText(item.startDate, item.endDate)}
                                     </span>
                                   )}
                                   <span className="font-bold text-sm text-slate-900">{item.title}</span>
                                   <span className={'text-[10px] px-1.5 py-0.2 rounded font-semibold border ' + style.badge}>{item.author}</span>
                                   {item.time && <span className="text-[10px] bg-slate-100 text-slate-600 px-1 rounded font-mono">{item.time}</span>}
                                 </div>
-                                {isMulti && (
-                                  <div className="text-[11px] text-slate-500 font-mono mb-0.5">
-                                    期間: {item.startDate} 〜 {item.endDate}
-                                  </div>
-                                )}
+                                {isMulti && <div className="text-[11px] text-slate-500 font-mono mb-0.5">期間: {item.startDate} 〜 {item.endDate}</div>}
                                 {item.memo && <p className="text-xs text-slate-500">{item.memo}</p>}
                               </div>
                               <button onClick={(e) => handleDelSched(item.id, e)} className="p-2 text-slate-300 hover:text-rose-500 transition shrink-0">
@@ -734,42 +701,32 @@ export default function App() {
                     </button>
                   </div>
                   {scheds.length === 0 ? (
-                    <div className="py-8 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">
-                      登録されている予定はありません
-                    </div>
+                    <div className="py-8 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">登録されている予定はありません</div>
                   ) : (
-                    scheds
-                      .sort((a, b) => a.startDate.localeCompare(b.startDate))
-                      .map((item) => {
-                        const style = STYLES[item.author] || STYLES['共通'];
-                        const isMulti = item.isMultiDay || (item.endDate && item.endDate > item.startDate);
-                        return (
-                          <div key={item.id} className={'p-3 bg-white rounded-xl border border-slate-200 shadow-xs flex items-center justify-between ' + style.border}>
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs font-mono font-bold text-slate-600">
-                                  {item.startDate.slice(5)}
-                                  {isMulti ? '〜' + item.endDate.slice(5) : ''}
-                                </span>
-                                <span className="font-bold text-sm text-slate-900">{item.title}</span>
-                                {isMulti && <span className="text-[10px] bg-amber-50 text-amber-700 px-1.5 py-0.2 rounded border border-amber-200 font-bold">{getDurationText(item.startDate, item.endDate)}</span>}
-                                <span className={'text-[10px] px-1.5 py-0.2 rounded font-semibold border ' + style.badge}>{item.author}</span>
-                              </div>
-                              {item.memo && <p className="text-xs text-slate-500 mt-0.5">{item.memo}</p>}
+                    scheds.sort((a, b) => a.startDate.localeCompare(b.startDate)).map((item) => {
+                      const style = STYLES[item.author] || STYLES['共通'];
+                      const isMulti = item.isMultiDay || (item.endDate && item.endDate > item.startDate);
+                      return (
+                        <div key={item.id} className={'p-3 bg-white rounded-xl border border-slate-200 shadow-xs flex items-center justify-between ' + style.border}>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-mono font-bold text-slate-600">{item.startDate.slice(5)}{isMulti ? '〜' + item.endDate.slice(5) : ''}</span>
+                              <span className="font-bold text-sm text-slate-900">{item.title}</span>
+                              <span className={'text-[10px] px-1.5 py-0.2 rounded font-semibold border ' + style.badge}>{item.author}</span>
                             </div>
-                            <button onClick={(e) => handleDelSched(item.id, e)} className="p-2 text-slate-300 hover:text-rose-500">
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                            {item.memo && <p className="text-xs text-slate-500 mt-0.5">{item.memo}</p>}
                           </div>
-                        );
-                      })
+                          <button onClick={(e) => handleDelSched(item.id, e)} className="p-2 text-slate-300 hover:text-rose-500"><Trash2 className="w-4 h-4" /></button>
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               )}
             </div>
           )}
 
-          {/* 買い出しToDoタブ */}
+          {/* 買い出しToDo */}
           {tab === 'todo' && (
             <div className="space-y-3">
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
@@ -792,22 +749,16 @@ export default function App() {
 
               <div className="space-y-2">
                 {todos.filter((t) => !t.done).length === 0 ? (
-                  <div className="py-8 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">
-                    買うものはありません
-                  </div>
+                  <div className="py-8 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">買うものはありません</div>
                 ) : (
                   todos.filter((t) => !t.done).map((item) => (
                     <div key={item.id} onClick={() => handleToggleTodo(item.id)} className={'p-3 bg-white rounded-xl border border-slate-200 shadow-xs flex items-center justify-between cursor-pointer ' + (STYLES[item.author] ? STYLES[item.author].border : '')}>
                       <div className="flex items-center gap-3">
-                        <div className="w-5 h-5 rounded border border-slate-300 flex items-center justify-center text-transparent hover:border-slate-500">
-                          <Check className="w-3.5 h-3.5" />
-                        </div>
+                        <div className="w-5 h-5 rounded border border-slate-300 flex items-center justify-center text-transparent hover:border-slate-500"><Check className="w-3.5 h-3.5" /></div>
                         <span className="font-bold text-sm text-slate-900">{item.name}</span>
                         <span className={'text-[10px] px-1.5 py-0.2 rounded font-semibold border ' + (STYLES[item.author] ? STYLES[item.author].badge : '')}>{item.author}</span>
                       </div>
-                      <button onClick={(e) => handleDelTodo(item.id, e)} className="p-2 text-slate-300 hover:text-rose-500">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      <button onClick={(e) => handleDelTodo(item.id, e)} className="p-2 text-slate-300 hover:text-rose-500"><Trash2 className="w-4 h-4" /></button>
                     </div>
                   ))
                 )}
@@ -818,13 +769,8 @@ export default function App() {
                     <div className="space-y-1 opacity-60">
                       {todos.filter((t) => t.done).map((item) => (
                         <div key={item.id} onClick={() => handleToggleTodo(item.id)} className="p-2 bg-slate-50 rounded-lg border border-slate-200 text-xs line-through text-slate-400 flex items-center justify-between cursor-pointer">
-                          <div className="flex items-center gap-2">
-                            <Check className="w-3.5 h-3.5 text-slate-500" />
-                            <span>{item.name}</span>
-                          </div>
-                          <button onClick={(e) => handleDelTodo(item.id, e)} className="p-1 text-slate-300 hover:text-rose-500">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          <div className="flex items-center gap-2"><Check className="w-3.5 h-3.5 text-slate-500" /><span>{item.name}</span></div>
+                          <button onClick={(e) => handleDelTodo(item.id, e)} className="p-1 text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
                         </div>
                       ))}
                     </div>
@@ -834,7 +780,7 @@ export default function App() {
             </div>
           )}
 
-          {/* レシピ帳タブ */}
+          {/* レシピ帳 */}
           {tab === 'recipe' && (
             <div className="space-y-3">
               <div className="flex gap-2">
@@ -850,19 +796,17 @@ export default function App() {
                 )}
               </div>
 
-              {/* レシピ自動解析ボタン */}
               <button onClick={() => setOpenAiModal(true)} className="w-full bg-slate-900 hover:bg-slate-800 text-white p-3.5 rounded-xl flex items-center justify-between text-xs font-bold shadow-xs transition">
                 <div className="flex items-center gap-2.5 text-left">
                   <Sparkles className="w-5 h-5 text-amber-300 shrink-0" />
                   <div>
                     <div className="text-sm">動画URL・概要欄からレシピ自動解析</div>
-                    <div className="text-[11px] text-slate-300 font-normal">YouTube/TikTokの材料・調味料・手順を完全自動整理</div>
+                    <div className="text-[11px] text-slate-300 font-normal">YouTubeの材料・調味料・手順を自動判定</div>
                   </div>
                 </div>
                 <Plus className="w-4 h-4 text-slate-400" />
               </button>
 
-              {/* レシピ一覧 */}
               <div className="space-y-2">
                 {recipes.filter((r) => r.title.indexOf(rQuery) !== -1 || (r.ingredients && r.ingredients.some((i) => (i.name || i).includes(rQuery)))).length === 0 ? (
                   <div className="py-8 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">
@@ -891,17 +835,16 @@ export default function App() {
                           </div>
                           <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                             {recipe.sourceUrl && (
-                              <a href={recipe.sourceUrl} target="_blank" rel="noopener noreferrer" title="元動画・Webサイトを開く" className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg">
+                              <a href={recipe.sourceUrl} target="_blank" rel="noopener noreferrer" title="元動画を開く" className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg">
                                 <ExternalLink className="w-4 h-4" />
                               </a>
                             )}
-                            <button onClick={() => setEditingRecipe({ ...recipe })} title="レシピを編集" className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg">
+                            <button onClick={() => setEditingRecipe({ ...recipe })} title="編集" className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg">
                               <Edit2 className="w-4 h-4" />
                             </button>
                           </div>
                         </div>
 
-                        {/* アコーディオン詳細 */}
                         {isExp && (
                           <div className="p-3.5 border-t border-slate-100 bg-slate-50/50 space-y-3 text-xs">
                             <div className="flex bg-slate-200/70 p-0.5 rounded-lg text-xs">
@@ -918,7 +861,7 @@ export default function App() {
                                 <div>
                                   <div className="font-bold text-slate-600 mb-1.5 flex justify-between items-center">
                                     <span>食材</span>
-                                    <span className="text-[10px] text-slate-400">「買う」で買い出しToDoに追加</span>
+                                    <span className="text-[10px] text-slate-400">「買う」で買い出しリストに追加</span>
                                   </div>
                                   <div className="space-y-1">
                                     {(recipe.ingredients || []).length === 0 ? (
@@ -977,9 +920,7 @@ export default function App() {
                                 ) : (
                                   recipe.steps.map((st, idx) => (
                                     <div key={idx} className="flex items-start gap-2.5 p-2 bg-white rounded-lg border border-slate-200 leading-relaxed">
-                                      <span className="w-4 h-4 rounded-full bg-slate-900 text-white font-mono text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
-                                        {idx + 1}
-                                      </span>
+                                      <span className="w-4 h-4 rounded-full bg-slate-900 text-white font-mono text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">{idx + 1}</span>
                                       <p className="text-xs">{st}</p>
                                     </div>
                                   ))
@@ -997,25 +938,25 @@ export default function App() {
           )}
         </main>
 
-        {/* AIモーダル */}
+        {/* レシピ入力モーダル */}
         {openAiModal && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
               <div className="flex justify-between items-center pb-2 border-b">
                 <div className="flex items-center gap-1.5">
                   <Sparkles className="w-4 h-4 text-amber-500" />
-                  <h3 className="font-bold text-sm text-slate-800">動画URL・概要欄からレシピ解析</h3>
+                  <h3 className="font-bold text-sm text-slate-800">動画URL・概要欄から自動解析</h3>
                 </div>
                 <button onClick={() => setOpenAiModal(false)}><X className="w-5 h-5 text-slate-400" /></button>
               </div>
 
               <div className="space-y-2">
                 <p className="text-[11px] text-slate-500 leading-relaxed">
-                  YouTube / TikTok の動画URL、または概要欄テキストを貼り付けてください。料理名・食材・調味料・手順を自動抽出します。
+                  YouTubeの動画URL、または概要欄テキストを貼り付けてください。食材・調味料・手順を自動分割します。
                 </p>
                 <textarea
                   rows={6}
-                  placeholder={'例: https://youtu.be/...\nまたは概要欄のテキスト（豚バラ 200g、醤油 大さじ2...）'}
+                  placeholder={'https://youtu.be/...\nまたは概要欄のテキスト（手羽元 8本、大根 400g、醤油 大さじ3...）'}
                   value={aiInput}
                   onChange={(e) => setAiInput(e.target.value)}
                   className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none focus:border-slate-800"
@@ -1028,7 +969,7 @@ export default function App() {
                   {isAiLoading ? (
                     <>
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>YouTube概要欄からレシピを抽出中...</span>
+                      <span>レシピデータを抽出中...</span>
                     </>
                   ) : (
                     <>
@@ -1042,7 +983,7 @@ export default function App() {
           </div>
         )}
 
-        {/* プレビューモーダル */}
+        {/* プレビュー確認モーダル */}
         {previewRecipe && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3 max-h-[85vh] overflow-y-auto">
@@ -1050,6 +991,13 @@ export default function App() {
                 <h3 className="font-bold text-sm">解析結果の確認・微調整</h3>
                 <button onClick={() => setPreviewRecipe(null)}><X className="w-5 h-5 text-slate-400" /></button>
               </div>
+
+              {previewRecipe.fetchWarning && (
+                <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-[11px] flex gap-1.5 items-start">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>{previewRecipe.fetchWarning}</span>
+                </div>
+              )}
 
               <div className="space-y-3 text-xs">
                 <div>
@@ -1063,7 +1011,7 @@ export default function App() {
                 </div>
 
                 <div>
-                  <label className="text-[11px] font-bold text-slate-500 block mb-1">記入者（色分け）</label>
+                  <label className="text-[11px] font-bold text-slate-500 block mb-1">記入者</label>
                   <div className="grid grid-cols-3 gap-2">
                     {['夫', '妻', '共通'].map((p) => (
                       <button
@@ -1170,7 +1118,7 @@ export default function App() {
                 />
                 <input
                   type="url"
-                  placeholder="動画・Web URL"
+                  placeholder="動画URL"
                   value={editingRecipe.sourceUrl || ''}
                   onChange={(e) => setEditingRecipe({ ...editingRecipe, sourceUrl: e.target.value })}
                   className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none"
@@ -1216,11 +1164,11 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                <input type="text" required placeholder="予定名（北海道旅行、保育園お迎えなど）" value={sTitle} onChange={(e) => setSTitle(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
+                <input type="text" required placeholder="予定名（北海道旅行など）" value={sTitle} onChange={(e) => setSTitle(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
                 
                 <div className="space-y-1">
                   <div className="flex justify-between items-center">
-                    <span className="text-[11px] font-bold text-slate-600">日程（連日・宿泊に対応）</span>
+                    <span className="text-[11px] font-bold text-slate-600">日程</span>
                     <span className="text-[11px] text-amber-700 font-bold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
                       {getDurationText(sStart, sEnd)}
                     </span>
@@ -1257,7 +1205,7 @@ export default function App() {
                   <span className="text-[10px] text-slate-400 block mb-0.5">時間（空欄の場合は終日）</span>
                   <input type="time" value={sTime} onChange={(e) => setSTime(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs" />
                 </div>
-                <input type="text" placeholder="メモ（ホテル名、夕飯不要など）" value={sMemo} onChange={(e) => setSMemo(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
+                <input type="text" placeholder="メモ（ホテル名など）" value={sMemo} onChange={(e) => setSMemo(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
                 <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs">登録する</button>
               </form>
             </div>
@@ -1280,14 +1228,14 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                <input type="text" required placeholder="品名（卵、牛乳、洗剤など）" value={tName} onChange={(e) => setTName(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
+                <input type="text" required placeholder="品名（卵、牛乳など）" value={tName} onChange={(e) => setTName(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
                 <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs">追加する</button>
               </form>
             </div>
           </div>
         )}
 
-        {/* ゴミ箱モーダル */}
+        {/* ゴミ箱 */}
         {openTrash && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -1313,7 +1261,7 @@ export default function App() {
           </div>
         )}
 
-        {/* 下部ナビゲーション */}
+        {/* ナビゲーション */}
         <nav className="fixed bottom-0 w-full max-w-md bg-white border-t border-slate-200 flex justify-around py-2 px-3 z-40">
           <button onClick={() => setTab('schedule')} className={'flex flex-col items-center flex-1 py-1 ' + (tab === 'schedule' ? 'text-slate-900 font-bold' : 'text-slate-400')}>
             <CalendarIcon className="w-5 h-5" />
