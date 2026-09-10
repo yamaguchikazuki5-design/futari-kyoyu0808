@@ -32,7 +32,9 @@ import {
   Cloud,
   ExternalLink,
   Edit2,
-  Loader2
+  Loader2,
+  MapPin,
+  Luggage
 } from 'lucide-react';
 
 // --- お二人専用のFirebase接続設定 ---
@@ -50,29 +52,30 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-// 色分けスタイル定義
 const STYLES = {
   '夫': {
     badge: 'bg-blue-100 text-blue-800 border-blue-300',
     border: 'border-l-4 border-l-blue-500',
     cell: 'bg-blue-100 text-blue-800 border-l-2 border-blue-500',
+    bar: 'bg-blue-500 text-white',
     btn: 'bg-blue-600 text-white'
   },
   '妻': {
     badge: 'bg-rose-100 text-rose-800 border-rose-300',
     border: 'border-l-4 border-l-rose-500',
     cell: 'bg-rose-100 text-rose-800 border-l-2 border-rose-500',
+    bar: 'bg-rose-500 text-white',
     btn: 'bg-rose-600 text-white'
   },
   '共通': {
     badge: 'bg-emerald-100 text-emerald-800 border-emerald-300',
     border: 'border-l-4 border-l-emerald-500',
     cell: 'bg-emerald-100 text-emerald-800 border-l-2 border-emerald-500',
+    bar: 'bg-emerald-600 text-white',
     btn: 'bg-emerald-600 text-white'
   }
 };
 
-// ローカルキャッシュ関数（オフライン保護）
 const loadLocal = (key, fallback) => {
   try {
     const v = localStorage.getItem('fn_' + key);
@@ -100,7 +103,7 @@ export default function App() {
     setToast(msg);
     setTimeout(() => {
       setToast((prev) => (prev === msg ? null : prev));
-    }, 2200);
+    }, 2500);
   };
 
   const today = new Date();
@@ -111,21 +114,19 @@ export default function App() {
   const [selDate, setSelDate] = useState(todayStr);
   const [vDate, setVDate] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
 
-  // 各データステート（端末保存から即時復元）
+  // 各データステート
   const [scheds, setScheds] = useState(() => loadLocal('scheds', []));
   const [todos, setTodos] = useState(() => loadLocal('todos', []));
   const [recipes, setRecipes] = useState(() => loadLocal('recipes', []));
   const [trash, setTrash] = useState(() => loadLocal('trash', []));
   const [freqs, setFreqs] = useState(() => loadLocal('freqs', ['牛乳', 'たまご', 'お米', '食パン', '納豆', '玉ねぎ', '豚肉', 'トイレットペーパー']));
 
-  // 1. Firebase 匿名認証
   useEffect(() => {
     signInAnonymously(auth).catch((err) => {
       console.warn('Auth note:', err.message);
     });
   }, []);
 
-  // 2. クラウド（Firestore）とのリアルタイム同期
   useEffect(() => {
     let unsubs = [];
     try {
@@ -135,9 +136,7 @@ export default function App() {
         setScheds(list);
         saveLocal('scheds', list);
         setSyncStatus('connected');
-      }, (err) => {
-        console.warn('Sched error:', err);
-      });
+      }, (err) => console.warn('Sched sync:', err));
 
       const unsubTodos = onSnapshot(collection(db, 'todos'), (snap) => {
         const list = [];
@@ -145,9 +144,7 @@ export default function App() {
         setTodos(list);
         saveLocal('todos', list);
         setSyncStatus('connected');
-      }, (err) => {
-        console.warn('Todos error:', err);
-      });
+      }, (err) => console.warn('Todos sync:', err));
 
       const unsubRecipes = onSnapshot(collection(db, 'recipes'), (snap) => {
         const list = [];
@@ -155,18 +152,14 @@ export default function App() {
         setRecipes(list);
         saveLocal('recipes', list);
         setSyncStatus('connected');
-      }, (err) => {
-        console.warn('Recipes error:', err);
-      });
+      }, (err) => console.warn('Recipes sync:', err));
 
       const unsubTrash = onSnapshot(collection(db, 'trash'), (snap) => {
         const list = [];
         snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
         setTrash(list);
         saveLocal('trash', list);
-      }, (err) => {
-        console.warn('Trash error:', err);
-      });
+      }, (err) => console.warn('Trash sync:', err));
 
       unsubs = [unsubSched, unsubTodos, unsubRecipes, unsubTrash];
     } catch (e) {
@@ -178,46 +171,44 @@ export default function App() {
     };
   }, []);
 
-  // 予定用ステート
   const [openAddSched, setOpenAddSched] = useState(false);
   const [sTitle, setSTitle] = useState('');
   const [sStart, setSStart] = useState(todayStr);
   const [sEnd, setSEnd] = useState(todayStr);
   const [sTime, setSTime] = useState('');
-  const [sAuthor, setSAuthor] = useState('夫');
+  const [sAuthor, setSAuthor] = useState('共通');
   const [sMemo, setSMemo] = useState('');
 
-  // ToDo用ステート
-  const [openAddTodo, setOpenAddTodo] = useState(false);
-  const [tName, setTName] = useState('');
-  const [tAuthor, setTAuthor] = useState('妻');
-
-  // レシピ用ステート
-  const [openAiModal, setOpenAiModal] = useState(false);
-  const [aiInput, setAiInput] = useState('');
-  const [isAiLoading, setIsAiLoading] = useState(false);
-  const [previewRecipe, setPreviewRecipe] = useState(null);
-  const [editingRecipe, setEditingRecipe] = useState(null);
-  const [recipeTab, setRecipeTab] = useState('ingredients');
-  const [expRecipeId, setExpRecipeId] = useState(null);
-  const [openTrash, setOpenTrash] = useState(false);
-  const [rQuery, setRQuery] = useState('');
+  // 泊数・日数の計算関数
+  const getDurationText = (start, end) => {
+    if (!start || !end) return '';
+    const d1 = new Date(start);
+    const d2 = new Date(end);
+    const diffTime = d2.getTime() - d1.getTime();
+    const diffDays = Math.round(diffTime / (1000 * 3600 * 24)) + 1;
+    if (diffDays <= 1) return '日帰り';
+    const nights = diffDays - 1;
+    return nights + '泊' + diffDays + '日 (' + diffDays + '日間)';
+  };
 
   const cYear = vDate.getFullYear();
   const cMonth = vDate.getMonth();
   const firstDay = new Date(cYear, cMonth, 1).getDay();
   const daysInMonth = new Date(cYear, cMonth + 1, 0).getDate();
 
-  // スケジュール登録
   const handleAddSched = async (e) => {
     e.preventDefault();
     if (!sTitle.trim()) return;
+
+    const finalEnd = sEnd < sStart ? sStart : sEnd;
+    const isMultiDay = finalEnd > sStart;
 
     const item = {
       id: 's_' + String(Date.now()),
       title: sTitle.trim(),
       startDate: sStart,
-      endDate: sEnd < sStart ? sStart : sEnd,
+      endDate: finalEnd,
+      isMultiDay: isMultiDay,
       time: sTime,
       author: sAuthor,
       memo: sMemo.trim()
@@ -231,7 +222,7 @@ export default function App() {
     setSMemo('');
     setSTime('');
     setOpenAddSched(false);
-    showToast('予定を登録しました');
+    showToast('予定を登録しました（' + (isMultiDay ? getDurationText(sStart, finalEnd) : '1日') + '）');
 
     try {
       await setDoc(doc(db, 'schedules', item.id), item);
@@ -240,7 +231,6 @@ export default function App() {
     }
   };
 
-  // スケジュール削除
   const handleDelSched = async (id, e) => {
     if (e && e.stopPropagation) e.stopPropagation();
     const next = scheds.filter((x) => x.id !== id);
@@ -255,19 +245,28 @@ export default function App() {
     }
   };
 
+  // 選択日の予定一覧（連日予定も全て正しく抽出）
   const dayScheds = useMemo(() => {
     return scheds
       .filter((s) => selDate >= s.startDate && selDate <= (s.endDate || s.startDate))
-      .sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
+      .sort((a, b) => {
+        // 連日予定を先頭に、時間はその後にソート
+        if (a.isMultiDay && !b.isMultiDay) return -1;
+        if (!a.isMultiDay && b.isMultiDay) return 1;
+        return (a.time || '99:99').localeCompare(b.time || '99:99');
+      });
   }, [scheds, selDate]);
 
-  // ToDo追加
+  const [openAddTodo, setOpenAddTodo] = useState(false);
+  const [tName, setTName] = useState('');
+  const [tAuthor, setTAuthor] = useState('共通');
+
   const handleAddTodo = async (name, author = '共通') => {
     const txt = name.trim();
     if (!txt) return;
 
     if (todos.some((t) => t.name === txt && !t.done)) {
-      showToast('既に買い出しリストに入っています');
+      showToast('「' + txt + '」は既に買い出しリストに入っています');
       return;
     }
 
@@ -296,7 +295,6 @@ export default function App() {
     }
   };
 
-  // ToDo完了トグル
   const handleToggleTodo = async (id) => {
     const target = todos.find((t) => t.id === id);
     if (!target) return;
@@ -313,7 +311,6 @@ export default function App() {
     }
   };
 
-  // ToDo削除
   const handleDelTodo = async (id, e) => {
     if (e && e.stopPropagation) e.stopPropagation();
     const nextTodos = todos.filter((t) => t.id !== id);
@@ -328,7 +325,17 @@ export default function App() {
     }
   };
 
-  // AIレシピ自動抽出（YouTube・TikTok・テキスト対応）
+  const [openAiModal, setOpenAiModal] = useState(false);
+  const [aiInput, setAiInput] = useState('');
+  const [isAiLoading, setIsAiLoading] = useState(false);
+  const [previewRecipe, setPreviewRecipe] = useState(null);
+  const [editingRecipe, setEditingRecipe] = useState(null);
+  const [recipeTab, setRecipeTab] = useState('ingredients');
+  const [expRecipeId, setExpRecipeId] = useState(null);
+  const [openTrash, setOpenTrash] = useState(false);
+  const [rQuery, setRQuery] = useState('');
+
+  // 高度AI解析（動画URL・概要欄・字幕テキストの網羅的抽出）
   const handleAnalyzeAiRecipe = async () => {
     const input = aiInput.trim();
     if (!input) return;
@@ -344,7 +351,7 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           if (data && data.title) {
-            videoTitleHint = data.title + (data.author_name ? ' (' + data.author_name + ')' : '');
+            videoTitleHint = data.title + (data.author_name ? ' by ' + data.author_name : '');
           }
         }
       } catch (e) {
@@ -355,53 +362,28 @@ export default function App() {
     const apiKey = "";
     const apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=' + apiKey;
 
-    const systemPrompt = "あなたは家庭向け料理レシピの専門家です。提供された動画URL、タイトル、説明文、またはテキストから料理名、食材（分量付き）、調味料（分量付き）、作り方工程を正確に抽出し、指定のJSON形式で出力してください。食材と調味料は明確に分類してください。";
+    const systemPrompt = "あなたは家庭料理のプロフェッショナルです。提供された動画URL、タイトル、概要欄、またはレシピテキストから【料理名】【食材リスト（分量付き）】【調味料リスト（分量付き）】【調理工程（番号付きステップ）】を正確に抽出してください。" +
+      "重要ルール:\n" +
+      "1. 食材（肉、魚、野菜、卵、豆腐など）と調味料（醤油、酒、みりん、塩、油など）を厳格に分類してください。\n" +
+      "2. 分量は「大さじ1」「200g」「少々」「1/2個」など記載がある限り正確に添えてください。不明なら「適量」と記してください。\n" +
+      "3. 作り方手順は、下ごしらえ・加熱・味付け・盛り付けの流れが分かるように簡潔で明確な箇条書きにしてください。\n" +
+      "4. 必ず以下の形式の純粋なJSONのみを出力してください。マークダウンや余計な解説は不要です。\n" +
+      "{\n" +
+      "  \"title\": \"料理名\",\n" +
+      "  \"ingredients\": [{\"name\": \"豚バラ肉\", \"amount\": \"200g\"}],\n" +
+      "  \"seasonings\": [{\"name\": \"醤油\", \"amount\": \"大さじ2\"}],\n" +
+      "  \"steps\": [\"手順1\", \"手順2\"]\n" +
+      "}";
 
-    const userPrompt = "以下の情報からレシピを抽出してください:\n" +
-      "【入力】: " + input + "\n" +
-      (videoTitleHint ? "【動画情報】: " + videoTitleHint + "\n" : "") +
-      "もしURLだけの場合は、Web検索を活用してその動画やレシピの内容を調べて展開してください。";
+    const userPrompt = "以下の情報からレシピの材料・調味料・手順を詳細に抽出してください。\n" +
+      (videoTitleHint ? "【動画タイトル】: " + videoTitleHint + "\n" : "") +
+      "【入力内容】:\n" + input + "\n\n" +
+      "もしURLだけが入力されている場合は、Web検索ツールを活用してその動画の概要欄や公式レシピ、字幕・調理内容を検索し、食材・調味料・手順を省略せずに復元してください。";
 
     const payload = {
       contents: [{ parts: [{ text: userPrompt }] }],
       tools: [{ "google_search": {} }],
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: "OBJECT",
-          properties: {
-            title: { type: "STRING" },
-            ingredients: {
-              type: "ARRAY",
-              items: {
-                type: "OBJECT",
-                properties: {
-                  name: { type: "STRING" },
-                  amount: { type: "STRING" }
-                },
-                required: ["name", "amount"]
-              }
-            },
-            seasonings: {
-              type: "ARRAY",
-              items: {
-                type: "OBJECT",
-                properties: {
-                  name: { type: "STRING" },
-                  amount: { type: "STRING" }
-                },
-                required: ["name", "amount"]
-              }
-            },
-            steps: {
-              type: "ARRAY",
-              items: { type: "STRING" }
-            }
-          },
-          required: ["title", "ingredients", "seasonings", "steps"]
-        }
-      }
+      systemInstruction: { parts: [{ text: systemPrompt }] }
     };
 
     let resultJson = null;
@@ -419,43 +401,61 @@ export default function App() {
           const resData = await response.json();
           const text = resData.candidates?.[0]?.content?.parts?.[0]?.text;
           if (text) {
-            resultJson = JSON.parse(text);
-            break;
+            // JSONブロックの抽出
+            const match = text.match(/\{[\s\S]*\}/);
+            if (match) {
+              resultJson = JSON.parse(match[0]);
+              if (resultJson && resultJson.title && (resultJson.ingredients?.length > 0 || resultJson.steps?.length > 0)) {
+                break;
+              }
+            }
           }
         }
       } catch (err) {
-        // retry on error
+        console.warn('API attempt failed:', err);
       }
       if (i < delays.length) {
         await new Promise((r) => setTimeout(r, delays[i]));
       }
     }
 
-    // フォールバック: AI抽出が失敗した場合でも、テキストから簡易分解して救出
-    if (!resultJson || !resultJson.title) {
+    // 高度フォールバック: テキストや概要欄から賢く食材・調味料・手順を解析
+    if (!resultJson || !resultJson.title || (!resultJson.ingredients?.length && !resultJson.steps?.length)) {
       const lines = input.split('\n').map((l) => l.trim()).filter(Boolean);
-      let detectedTitle = videoTitleHint || '新しいレシピ';
+      let detectedTitle = videoTitleHint ? videoTitleHint.replace(/\s*by.*$/, '') : '新しいレシピ';
       const ings = [];
       const seas = [];
       const stps = [];
 
+      const seasoningKeywords = ['醤油', 'しょうゆ', 'みりん', '酒', '塩', '胡椒', 'こしょう', '砂糖', '油', 'ごま油', 'オリーブオイル', '酢', '大さじ', '小さじ', '顆粒', 'コンソメ', 'ほんだし', 'マヨネーズ', 'ケチャップ', '味噌', 'みそ', 'バター', 'にんにく', '生姜', 'しょうが'];
+
       lines.forEach((l) => {
-        if (l.indexOf('【') !== -1 && l.indexOf('】') !== -1) {
-          detectedTitle = l.replace(/【|】/g, '');
-        } else if (l.includes('醤油') || l.includes('みりん') || l.includes('酒') || l.includes('塩') || l.includes('砂糖') || l.includes('油') || l.includes('大さじ') || l.includes('小さじ')) {
-          seas.push({ name: l.replace(/^[・\-\*]\s*/, ''), amount: '' });
-        } else if (l.match(/^[0-9]/) || l.includes('炒める') || l.includes('煮る') || l.includes('焼く') || l.includes('切る')) {
-          stps.push(l.replace(/^[0-9]+[\.、\)\s]/, ''));
-        } else if (!l.startsWith('http')) {
-          ings.push({ name: l.replace(/^[・\-\*]\s*/, ''), amount: '' });
+        const clean = l.replace(/^[・\-\*①②③④⑤⑥⑦⑧⑨⑩\d+\.\s]/, '').trim();
+        if (!clean) return;
+
+        if ((l.indexOf('【') !== -1 && l.indexOf('】') !== -1) || l.startsWith('#') || l.includes('作り方') || l.includes('レシピ')) {
+          if (l.replace(/[【】#]/g, '').trim().length < 30) {
+            detectedTitle = l.replace(/[【】#]/g, '').trim();
+          }
+        } else if (seasoningKeywords.some((k) => clean.includes(k))) {
+          // 調味料と判定
+          const parts = clean.split(/[\s:：\t]+/);
+          seas.push({ name: parts[0], amount: parts.slice(1).join(' ') || '適量' });
+        } else if (clean.match(/^(炒める|煮る|焼く|切る|混ぜる|火を|温める|茹でる|レンチン|電子レンジ|沸騰)/) || l.match(/^[0-9]+[\.、\)\s]/)) {
+          // 手順と判定
+          stps.push(clean);
+        } else if (!clean.startsWith('http') && clean.length < 40) {
+          // 食材と判定
+          const parts = clean.split(/[\s:：\t]+/);
+          ings.push({ name: parts[0], amount: parts.slice(1).join(' ') || '適量' });
         }
       });
 
       resultJson = {
-        title: detectedTitle,
-        ingredients: ings.length > 0 ? ings : [{ name: '主な食材', amount: '適量' }],
+        title: detectedTitle || 'レシピメモ',
+        ingredients: ings.length > 0 ? ings : [{ name: 'メイン食材', amount: '適量' }],
         seasonings: seas,
-        steps: stps.length > 0 ? stps : ['材料を切って調理する']
+        steps: stps.length > 0 ? stps : ['材料を切って火が通るまで加熱調理する']
       };
     }
 
@@ -466,16 +466,15 @@ export default function App() {
       title: resultJson.title || '新しいレシピ',
       author: '共通',
       sourceUrl: input.startsWith('http') ? input : '',
-      ingredients: resultJson.ingredients || [],
-      seasonings: resultJson.seasonings || [],
-      steps: resultJson.steps || []
+      ingredients: Array.isArray(resultJson.ingredients) ? resultJson.ingredients : [],
+      seasonings: Array.isArray(resultJson.seasonings) ? resultJson.seasonings : [],
+      steps: Array.isArray(resultJson.steps) ? resultJson.steps : []
     });
 
     setOpenAiModal(false);
     setAiInput('');
   };
 
-  // プレビュー確定保存
   const handleSavePreviewRecipe = async () => {
     if (!previewRecipe) return;
 
@@ -494,7 +493,6 @@ export default function App() {
     setPreviewRecipe(null);
   };
 
-  // レシピ編集保存
   const handleSaveEditedRecipe = async (e) => {
     e.preventDefault();
     if (!editingRecipe) return;
@@ -513,7 +511,6 @@ export default function App() {
     setEditingRecipe(null);
   };
 
-  // レシピ削除（ゴミ箱へ移動）
   const handleDelRecipe = async (id, e) => {
     if (e && e.stopPropagation) e.stopPropagation();
     const target = recipes.find((r) => r.id === id);
@@ -538,7 +535,6 @@ export default function App() {
     }
   };
 
-  // レシピ復元
   const handleRestoreRecipe = async (id) => {
     const target = trash.find((r) => r.id === id);
     if (!target) return;
@@ -550,7 +546,7 @@ export default function App() {
     setRecipes(nextRecipes);
     saveLocal('trash', nextTrash);
     saveLocal('recipes', nextRecipes);
-    showToast('「' + target.title + '」をレシピ帳に復元しました');
+    showToast('「' + target.title + '」を復元しました');
 
     try {
       await deleteDoc(doc(db, 'trash', id));
@@ -597,7 +593,7 @@ export default function App() {
         {/* メインコンテンツ */}
         <main className="flex-1 p-3 overflow-y-auto">
 
-          {/* タブ1: スケジュール */}
+          {}
           {tab === 'schedule' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-xs">
@@ -622,33 +618,60 @@ export default function App() {
 
               {calMode === 'month' ? (
                 <>
+                  {/* カレンダー（連日バー対応） */}
                   <div className="bg-white border border-slate-200 rounded-xl p-2 shadow-xs">
                     <div className="grid grid-cols-7 text-center text-[11px] font-semibold text-slate-400 py-1 border-b border-slate-100">
                       <span className="text-rose-500">日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span className="text-blue-500">土</span>
                     </div>
                     <div className="grid grid-cols-7 gap-1 text-center mt-1">
                       {Array.from({ length: firstDay }).map((_, i) => (
-                        <div key={'e-' + i} className="min-h-[52px] bg-slate-50/40 rounded-lg" />
+                        <div key={'e-' + i} className="min-h-[58px] bg-slate-50/40 rounded-lg" />
                       ))}
                       {Array.from({ length: daysInMonth }).map((_, i) => {
                         const dayNum = i + 1;
                         const dStr = cYear + '-' + String(cMonth + 1).padStart(2, '0') + '-' + String(dayNum).padStart(2, '0');
                         const isSel = dStr === selDate;
                         const isTod = dStr === todayStr;
+                        
+                        // その日にかかっている予定（連日含む）
                         const evs = scheds.filter((s) => dStr >= s.startDate && dStr <= (s.endDate || s.startDate));
-                        const cellBoxClass = 'min-h-[52px] p-0.5 rounded-lg flex flex-col items-stretch border cursor-pointer ' + 
-                          (isSel ? 'border-slate-900 bg-slate-50 ring-1 ring-slate-900' : isTod ? 'border-amber-300 bg-amber-50/40' : 'border-slate-100 bg-white');
+                        
+                        const cellBoxClass = 'min-h-[58px] p-0.5 rounded-lg flex flex-col items-stretch border cursor-pointer transition ' + 
+                          (isSel ? 'border-slate-900 bg-slate-50 ring-1 ring-slate-900' : isTod ? 'border-amber-300 bg-amber-50/40' : 'border-slate-100 bg-white hover:border-slate-300');
                         const dayNumClass = 'text-[11px] font-mono leading-none text-left px-1 ' + 
                           (isTod ? 'font-bold text-amber-600' : isSel ? 'font-bold text-slate-900' : 'text-slate-600');
+                        
                         return (
                           <div key={dStr} onClick={() => setSelDate(dStr)} className={cellBoxClass}>
                             <span className={dayNumClass}>{dayNum}</span>
                             <div className="flex flex-col gap-0.5 mt-0.5">
-                              {evs.slice(0, 2).map((ev) => (
-                                <div key={ev.id} className={'text-[8px] px-1 py-0.5 rounded truncate text-left font-medium ' + (STYLES[ev.author] ? STYLES[ev.author].cell : 'bg-slate-100')}>
-                                  {ev.title}
-                                </div>
-                              ))}
+                              {evs.slice(0, 2).map((ev) => {
+                                const isStart = dStr === ev.startDate;
+                                const isEnd = dStr === ev.endDate;
+                                const isMulti = ev.isMultiDay || (ev.endDate && ev.endDate > ev.startDate);
+                                const style = STYLES[ev.author] || STYLES['共通'];
+                                
+                                if (isMulti) {
+                                  return (
+                                    <div 
+                                      key={ev.id} 
+                                      className={'text-[8px] px-1 py-0.5 truncate text-left font-bold ' + style.bar + ' ' + 
+                                        (isStart && isEnd ? 'rounded' : isStart ? 'rounded-l' : isEnd ? 'rounded-r' : 'rounded-none')}
+                                    >
+                                      {isStart ? '✈ ' + ev.title : ev.title}
+                                    </div>
+                                  );
+                                }
+
+                                return (
+                                  <div key={ev.id} className={'text-[8px] px-1 py-0.5 rounded truncate text-left font-medium ' + style.cell}>
+                                    {ev.title}
+                                  </div>
+                                );
+                              })}
+                              {evs.length > 2 && (
+                                <span className="text-[7px] text-slate-400 font-bold leading-none text-left px-0.5">+{evs.length - 2}</span>
+                              )}
                             </div>
                           </div>
                         );
@@ -656,45 +679,68 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* 選択日の予定詳細リスト */}
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-bold text-slate-600 flex items-center gap-1">
+                      <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
                         <Clock className="w-3.5 h-3.5 text-slate-500" />
                         {selDate} の予定（{dayScheds.length}件）
                       </span>
-                      <button onClick={() => { setSStart(selDate); setSEnd(selDate); setOpenAddSched(true); }} className="flex items-center gap-1 bg-slate-900 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-slate-800">
+                      <button 
+                        onClick={() => { setSStart(selDate); setSEnd(selDate); setOpenAddSched(true); }} 
+                        className="flex items-center gap-1 bg-slate-900 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-slate-800 transition shadow-xs"
+                      >
                         <Plus className="w-3.5 h-3.5" />予定追加
                       </button>
                     </div>
+
                     {dayScheds.length === 0 ? (
                       <div className="py-6 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">
-                        予定はありません
+                        {selDate} に予定はありません
                       </div>
                     ) : (
                       <div className="space-y-2">
-                        {dayScheds.map((item) => (
-                          <div key={item.id} className={'p-3 bg-white rounded-xl border border-slate-200 shadow-xs flex items-center justify-between ' + (STYLES[item.author] ? STYLES[item.author].border : '')}>
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <span className="font-bold text-sm text-slate-900">{item.title}</span>
-                                <span className={'text-[10px] px-1.5 py-0.2 rounded font-semibold border ' + (STYLES[item.author] ? STYLES[item.author].badge : '')}>{item.author}</span>
-                                {item.time && <span className="text-[10px] bg-slate-100 text-slate-600 px-1 rounded">{item.time}</span>}
+                        {dayScheds.map((item) => {
+                          const style = STYLES[item.author] || STYLES['共通'];
+                          const isMulti = item.isMultiDay || (item.endDate && item.endDate > item.startDate);
+                          const duration = getDurationText(item.startDate, item.endDate);
+
+                          return (
+                            <div key={item.id} className={'p-3 bg-white rounded-xl border border-slate-200 shadow-xs flex items-center justify-between ' + style.border}>
+                              <div className="flex-1 mr-2">
+                                <div className="flex flex-wrap items-center gap-1.5 mb-1">
+                                  {isMulti && (
+                                    <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-1.5 py-0.2 rounded border border-amber-300 flex items-center gap-1">
+                                      <Luggage className="w-3 h-3" />
+                                      {duration}
+                                    </span>
+                                  )}
+                                  <span className="font-bold text-sm text-slate-900">{item.title}</span>
+                                  <span className={'text-[10px] px-1.5 py-0.2 rounded font-semibold border ' + style.badge}>{item.author}</span>
+                                  {item.time && <span className="text-[10px] bg-slate-100 text-slate-600 px-1 rounded font-mono">{item.time}</span>}
+                                </div>
+                                {isMulti && (
+                                  <div className="text-[11px] text-slate-500 font-mono mb-0.5">
+                                    期間: {item.startDate} 〜 {item.endDate}
+                                  </div>
+                                )}
+                                {item.memo && <p className="text-xs text-slate-500">{item.memo}</p>}
                               </div>
-                              {item.memo && <p className="text-xs text-slate-500 mt-0.5">{item.memo}</p>}
+                              <button onClick={(e) => handleDelSched(item.id, e)} className="p-2 text-slate-300 hover:text-rose-500 transition shrink-0">
+                                <Trash2 className="w-4 h-4" />
+                              </button>
                             </div>
-                            <button onClick={(e) => handleDelSched(item.id, e)} className="p-2 text-slate-300 hover:text-rose-500">
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
                 </>
               ) : (
+                /* 一覧表示 */
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-slate-600">全予定 ({scheds.length}件)</span>
+                    <span className="text-xs font-bold text-slate-700">全スケジュール ({scheds.length}件)</span>
                     <button onClick={() => setOpenAddSched(true)} className="flex items-center gap-1 bg-slate-900 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-slate-800">
                       <Plus className="w-3.5 h-3.5" />予定追加
                     </button>
@@ -704,28 +750,38 @@ export default function App() {
                       登録されている予定はありません
                     </div>
                   ) : (
-                    scheds.map((item) => (
-                      <div key={item.id} className={'p-3 bg-white rounded-xl border border-slate-200 shadow-xs flex items-center justify-between ' + (STYLES[item.author] ? STYLES[item.author].border : '')}>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-mono font-bold text-slate-500">{item.startDate.slice(5)}</span>
-                            <span className="font-bold text-sm text-slate-900">{item.title}</span>
-                            <span className={'text-[10px] px-1.5 py-0.2 rounded font-semibold border ' + (STYLES[item.author] ? STYLES[item.author].badge : '')}>{item.author}</span>
+                    scheds
+                      .sort((a, b) => a.startDate.localeCompare(b.startDate))
+                      .map((item) => {
+                        const style = STYLES[item.author] || STYLES['共通'];
+                        const isMulti = item.isMultiDay || (item.endDate && item.endDate > item.startDate);
+                        return (
+                          <div key={item.id} className={'p-3 bg-white rounded-xl border border-slate-200 shadow-xs flex items-center justify-between ' + style.border}>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-mono font-bold text-slate-600">
+                                  {item.startDate.slice(5)}
+                                  {isMulti ? '〜' + item.endDate.slice(5) : ''}
+                                </span>
+                                <span className="font-bold text-sm text-slate-900">{item.title}</span>
+                                {isMulti && <span className="text-[10px] bg-amber-50 text-amber-700 px-1.5 py-0.2 rounded border border-amber-200 font-bold">{getDurationText(item.startDate, item.endDate)}</span>}
+                                <span className={'text-[10px] px-1.5 py-0.2 rounded font-semibold border ' + style.badge}>{item.author}</span>
+                              </div>
+                              {item.memo && <p className="text-xs text-slate-500 mt-0.5">{item.memo}</p>}
+                            </div>
+                            <button onClick={(e) => handleDelSched(item.id, e)} className="p-2 text-slate-300 hover:text-rose-500">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
                           </div>
-                          {item.memo && <p className="text-xs text-slate-500 mt-0.5">{item.memo}</p>}
-                        </div>
-                        <button onClick={(e) => handleDelSched(item.id, e)} className="p-2 text-slate-300 hover:text-rose-500">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    ))
+                        );
+                      })
                   )}
                 </div>
               )}
             </div>
           )}
 
-          {/* タブ2: 買い出しToDo */}
+          {}
           {tab === 'todo' && (
             <div className="space-y-3">
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
@@ -790,13 +846,13 @@ export default function App() {
             </div>
           )}
 
-          {/* タブ3: レシピ帳（AI自動抽出・食材買い出し連携完備） */}
+          {}
           {tab === 'recipe' && (
             <div className="space-y-3">
               <div className="flex gap-2">
                 <div className="relative flex-1">
                   <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <input type="text" placeholder="料理名や食材で検索..." value={rQuery} onChange={(e) => setRQuery(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 py-2 text-xs focus:outline-none focus:border-slate-800" />
+                  <input type="text" placeholder="料理名・食材名（豚肉、玉ねぎなど）で検索..." value={rQuery} onChange={(e) => setRQuery(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 py-2 text-xs focus:outline-none focus:border-slate-800" />
                 </div>
                 {trash.length > 0 && (
                   <button onClick={() => setOpenTrash(true)} title="ゴミ箱" className="p-2 bg-white border border-slate-200 rounded-xl text-slate-600 relative shrink-0">
@@ -807,15 +863,15 @@ export default function App() {
               </div>
 
               {/* AIレシピ自動抽出ボタン */}
-              <button onClick={() => setOpenAiModal(true)} className="w-full bg-slate-900 hover:bg-slate-800 text-white p-3 rounded-xl flex items-center justify-between text-xs font-bold shadow-xs transition">
-                <div className="flex items-center gap-2 text-left">
-                  <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
+              <button onClick={() => setOpenAiModal(true)} className="w-full bg-slate-900 hover:bg-slate-800 text-white p-3.5 rounded-xl flex items-center justify-between text-xs font-bold shadow-xs transition">
+                <div className="flex items-center gap-2.5 text-left">
+                  <Sparkles className="w-5 h-5 text-amber-300 shrink-0" />
                   <div>
-                    <div>動画URL・テキストからAIレシピ自動抽出</div>
-                    <div className="text-[10px] text-slate-300 font-normal">YouTube/TikTokの動画URLや概要欄から材料・手順を整理</div>
+                    <div className="text-sm">動画URL・概要欄からレシピ自動解析</div>
+                    <div className="text-[11px] text-slate-300 font-normal">YouTube/TikTokの材料・調味料・手順をAIが完全整理</div>
                   </div>
                 </div>
-                <Plus className="w-4 h-4" />
+                <Plus className="w-4 h-4 text-slate-400" />
               </button>
 
               {/* レシピ一覧 */}
@@ -831,15 +887,17 @@ export default function App() {
                     return (
                       <div key={recipe.id} className={'bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden ' + style.border}>
                         <div onClick={() => setExpRecipeId(isExp ? null : recipe.id)} className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-slate-50">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2.5">
                             <UtensilsCrossed className="w-4 h-4 text-slate-400 shrink-0" />
                             <div>
                               <div className="flex items-center gap-2">
                                 <h3 className="font-bold text-sm text-slate-900">{recipe.title}</h3>
                                 <span className={'text-[10px] px-1.5 py-0.2 rounded font-semibold border ' + style.badge}>{recipe.author}</span>
                               </div>
-                              <div className="text-[11px] text-slate-400 mt-0.5">
-                                食材 {(recipe.ingredients || []).length}個 / 調味料 {(recipe.seasonings || []).length}個
+                              <div className="text-[11px] text-slate-400 mt-0.5 flex gap-2">
+                                <span>食材 {(recipe.ingredients || []).length}種</span>
+                                <span>調味料 {(recipe.seasonings || []).length}種</span>
+                                <span>工程 {(recipe.steps || []).length}段階</span>
                               </div>
                             </div>
                           </div>
@@ -859,11 +917,11 @@ export default function App() {
                         {isExp && (
                           <div className="p-3.5 border-t border-slate-100 bg-slate-50/50 space-y-3 text-xs">
                             <div className="flex bg-slate-200/70 p-0.5 rounded-lg text-xs">
-                              <button onClick={() => setRecipeTab('ingredients')} className={'flex-1 py-1 font-bold rounded ' + (recipeTab === 'ingredients' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500')}>
-                                食材・調味料
+                              <button onClick={() => setRecipeTab('ingredients')} className={'flex-1 py-1.5 font-bold rounded ' + (recipeTab === 'ingredients' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500')}>
+                                材料・調味料
                               </button>
-                              <button onClick={() => setRecipeTab('steps')} className={'flex-1 py-1 font-bold rounded ' + (recipeTab === 'steps' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500')}>
-                                作り方・工程 ({(recipe.steps || []).length})
+                              <button onClick={() => setRecipeTab('steps')} className={'flex-1 py-1.5 font-bold rounded ' + (recipeTab === 'steps' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500')}>
+                                作り方・手順 ({(recipe.steps || []).length})
                               </button>
                             </div>
 
@@ -871,61 +929,76 @@ export default function App() {
                               <div className="space-y-3">
                                 {/* 食材 */}
                                 <div>
-                                  <div className="font-bold text-slate-500 mb-1 flex justify-between items-center">
+                                  <div className="font-bold text-slate-600 mb-1.5 flex justify-between items-center">
                                     <span>食材</span>
                                     <span className="text-[10px] text-slate-400">「買う」で買い出しToDoに追加</span>
                                   </div>
                                   <div className="space-y-1">
-                                    {(recipe.ingredients || []).map((ing, idx) => {
-                                      const name = typeof ing === 'string' ? ing : ing.name;
-                                      const amt = typeof ing === 'string' ? '' : ing.amount;
-                                      return (
-                                        <div key={idx} className="flex items-center justify-between p-1.5 bg-white rounded border border-slate-200">
-                                          <div className="flex items-center gap-1.5">
-                                            <span className="font-semibold text-slate-800">{name}</span>
-                                            {amt && <span className="text-slate-500 font-mono text-[11px]">({amt})</span>}
-                                          </div>
-                                          <button onClick={() => handleAddTodo(name)} className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold text-[10px] flex items-center gap-1 hover:bg-slate-200">
-                                            <ShoppingCart className="w-3 h-3" />買う
-                                          </button>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-
-                                {/* 調味料 */}
-                                {(recipe.seasonings && recipe.seasonings.length > 0) && (
-                                  <div>
-                                    <div className="font-bold text-slate-500 mb-1">調味料</div>
-                                    <div className="space-y-1">
-                                      {recipe.seasonings.map((sea, idx) => {
-                                        const name = typeof sea === 'string' ? sea : sea.name;
-                                        const amt = typeof sea === 'string' ? '' : sea.amount;
+                                    {(recipe.ingredients || []).length === 0 ? (
+                                      <p className="text-slate-400 text-[11px] p-2 bg-white rounded">食材情報はありません</p>
+                                    ) : (
+                                      recipe.ingredients.map((ing, idx) => {
+                                        const name = typeof ing === 'string' ? ing : ing.name;
+                                        const amt = typeof ing === 'string' ? '' : ing.amount;
                                         return (
-                                          <div key={idx} className="flex items-center justify-between p-1.5 bg-amber-50/60 rounded border border-amber-200/60 text-xs">
-                                            <div className="flex items-center gap-1.5">
+                                          <div key={idx} className="flex items-center justify-between p-2 bg-white rounded-lg border border-slate-200">
+                                            <div className="flex items-center gap-2">
                                               <span className="font-semibold text-slate-800">{name}</span>
-                                              {amt && <span className="text-slate-600 font-mono text-[11px]">({amt})</span>}
+                                              {amt && <span className="text-slate-500 font-mono text-[11px]">({amt})</span>}
                                             </div>
-                                            <button onClick={() => handleAddTodo(name)} className="bg-white text-slate-700 px-2 py-0.5 rounded font-bold text-[10px] flex items-center gap-1 border border-slate-200 hover:bg-slate-50">
+                                            <button onClick={() => handleAddTodo(name)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1 rounded font-bold text-[10px] flex items-center gap-1 transition">
                                               <ShoppingCart className="w-3 h-3" />買う
                                             </button>
                                           </div>
                                         );
-                                      })}
-                                    </div>
+                                      })
+                                    )}
                                   </div>
-                                )}
+                                </div>
+
+                                {/* 調味料 */}
+                                <div>
+                                  <div className="font-bold text-slate-600 mb-1.5">調味料</div>
+                                  <div className="space-y-1">
+                                    {(recipe.seasonings || []).length === 0 ? (
+                                      <p className="text-slate-400 text-[11px] p-2 bg-white rounded">調味料情報はありません</p>
+                                    ) : (
+                                      recipe.seasonings.map((sea, idx) => {
+                                        const name = typeof sea === 'string' ? sea : sea.name;
+                                        const amt = typeof sea === 'string' ? '' : sea.amount;
+                                        return (
+                                          <div key={idx} className="flex items-center justify-between p-2 bg-amber-50/60 rounded-lg border border-amber-200/60">
+                                            <div className="flex items-center gap-2">
+                                              <span className="font-semibold text-slate-800">{name}</span>
+                                              {amt && <span className="text-slate-600 font-mono text-[11px]">({amt})</span>}
+                                            </div>
+                                            <button onClick={() => handleAddTodo(name)} className="bg-white hover:bg-amber-100 text-slate-700 px-2.5 py-1 rounded font-bold text-[10px] flex items-center gap-1 border border-slate-200 transition">
+                                              <ShoppingCart className="w-3 h-3" />買う
+                                            </button>
+                                          </div>
+                                        );
+                                      })
+                                    )}
+                                  </div>
+                                </div>
                               </div>
                             )}
 
                             {recipeTab === 'steps' && (
-                              <ol className="list-decimal list-inside space-y-1.5 text-slate-700">
-                                {(recipe.steps || []).map((st, idx) => (
-                                  <li key={idx} className="p-1.5 bg-white rounded border border-slate-200 leading-relaxed">{st}</li>
-                                ))}
-                              </ol>
+                              <div className="space-y-2 text-slate-700">
+                                {(recipe.steps || []).length === 0 ? (
+                                  <p className="text-slate-400 text-[11px] p-2 bg-white rounded">手順情報はありません</p>
+                                ) : (
+                                  recipe.steps.map((st, idx) => (
+                                    <div key={idx} className="flex items-start gap-2.5 p-2 bg-white rounded-lg border border-slate-200 leading-relaxed">
+                                      <span className="w-4 h-4 rounded-full bg-slate-900 text-white font-mono text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                                        {idx + 1}
+                                      </span>
+                                      <p className="text-xs">{st}</p>
+                                    </div>
+                                  ))
+                                )}
+                              </div>
                             )}
                           </div>
                         )}
@@ -938,25 +1011,25 @@ export default function App() {
           )}
         </main>
 
-        {/* モーダル: AIレシピ自動抽出 */}
+        {}
         {openAiModal && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
               <div className="flex justify-between items-center pb-2 border-b">
                 <div className="flex items-center gap-1.5">
                   <Sparkles className="w-4 h-4 text-amber-500" />
-                  <h3 className="font-bold text-sm text-slate-800">動画URL・テキストから抽出</h3>
+                  <h3 className="font-bold text-sm text-slate-800">動画URL・概要欄からレシピ解析</h3>
                 </div>
                 <button onClick={() => setOpenAiModal(false)}><X className="w-5 h-5 text-slate-400" /></button>
               </div>
 
               <div className="space-y-2">
                 <p className="text-[11px] text-slate-500 leading-relaxed">
-                  YouTube / TikTok の動画URL、または概要欄テキストを貼り付けてください。AIが自動で料理名・食材・調味料・手順に分解します。
+                  YouTube / TikTok の動画URL、または概要欄テキストを貼り付けてください。AIが料理名・食材・調味料・手順を自動抽出します。
                 </p>
                 <textarea
-                  rows={5}
-                  placeholder={'例: https://youtu.be/...\nまたは概要欄のテキスト（豚バラ 200g、醤油 大さじ2...）'}
+                  rows={6}
+                  placeholder={'例: https://youtu.be/...\nまたは概要欄のテキスト（豚バラ 200g、醤油 大さじ2、フライパンで両面を焼く...）'}
                   value={aiInput}
                   onChange={(e) => setAiInput(e.target.value)}
                   className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none focus:border-slate-800"
@@ -964,12 +1037,12 @@ export default function App() {
                 <button
                   onClick={handleAnalyzeAiRecipe}
                   disabled={isAiLoading || !aiInput.trim()}
-                  className="w-full bg-slate-900 disabled:bg-slate-300 text-white font-bold py-2.5 rounded-lg text-xs flex items-center justify-center gap-1.5"
+                  className="w-full bg-slate-900 disabled:bg-slate-300 text-white font-bold py-2.5 rounded-lg text-xs flex items-center justify-center gap-1.5 transition"
                 >
                   {isAiLoading ? (
                     <>
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>AIがレシピを解析中...</span>
+                      <span>動画・テキストからレシピを解析中...</span>
                     </>
                   ) : (
                     <>
@@ -983,12 +1056,12 @@ export default function App() {
           </div>
         )}
 
-        {/* モーダル: 抽出結果のプレビュー＆微調整 */}
+        {}
         {previewRecipe && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3 max-h-[85vh] overflow-y-auto">
               <div className="flex justify-between items-center pb-2 border-b">
-                <h3 className="font-bold text-sm">抽出結果の確認・微調整</h3>
+                <h3 className="font-bold text-sm">解析結果の確認・微調整</h3>
                 <button onClick={() => setPreviewRecipe(null)}><X className="w-5 h-5 text-slate-400" /></button>
               </div>
 
@@ -1020,7 +1093,7 @@ export default function App() {
                 </div>
 
                 <div>
-                  <label className="text-[11px] font-bold text-slate-500 block mb-1">食材 ({previewRecipe.ingredients.length}個)</label>
+                  <label className="text-[11px] font-bold text-slate-500 block mb-1">食材 ({previewRecipe.ingredients.length}品)</label>
                   <div className="space-y-1 max-h-32 overflow-y-auto">
                     {previewRecipe.ingredients.map((ing, idx) => (
                       <div key={idx} className="flex gap-1">
@@ -1050,9 +1123,40 @@ export default function App() {
                   </div>
                 </div>
 
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500 block mb-1">調味料 ({previewRecipe.seasonings.length}品)</label>
+                  <div className="space-y-1 max-h-32 overflow-y-auto">
+                    {previewRecipe.seasonings.map((sea, idx) => (
+                      <div key={idx} className="flex gap-1">
+                        <input
+                          type="text"
+                          value={sea.name}
+                          onChange={(e) => {
+                            const copy = [...previewRecipe.seasonings];
+                            copy[idx].name = e.target.value;
+                            setPreviewRecipe({ ...previewRecipe, seasonings: copy });
+                          }}
+                          className="flex-1 bg-slate-50 border rounded p-1 text-xs"
+                        />
+                        <input
+                          type="text"
+                          placeholder="分量"
+                          value={sea.amount}
+                          onChange={(e) => {
+                            const copy = [...previewRecipe.seasonings];
+                            copy[idx].amount = e.target.value;
+                            setPreviewRecipe({ ...previewRecipe, seasonings: copy });
+                          }}
+                          className="w-20 bg-slate-50 border rounded p-1 text-xs"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
                 <button
                   onClick={handleSavePreviewRecipe}
-                  className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs"
+                  className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs transition"
                 >
                   この内容でレシピ帳に登録
                 </button>
@@ -1061,7 +1165,7 @@ export default function App() {
           </div>
         )}
 
-        {/* レシピ編集モーダル */}
+        {}
         {editingRecipe && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -1110,12 +1214,12 @@ export default function App() {
           </div>
         )}
 
-        {/* 予定追加モーダル */}
+        {}
         {openAddSched && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
               <div className="flex justify-between items-center pb-2 border-b">
-                <h3 className="font-bold text-sm">予定を追加</h3>
+                <h3 className="font-bold text-sm">予定・旅行を追加</h3>
                 <button onClick={() => setOpenAddSched(false)}><X className="w-5 h-5 text-slate-400" /></button>
               </div>
               <form onSubmit={handleAddSched} className="space-y-3">
@@ -1126,19 +1230,56 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                <input type="text" required placeholder="予定名（旅行、お迎えなど）" value={sTitle} onChange={(e) => setSTitle(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
-                <div className="grid grid-cols-2 gap-2">
-                  <input type="date" required value={sStart} onChange={(e) => setSStart(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs" />
+                <input type="text" required placeholder="予定名（北海道旅行、帰省、お迎えなど）" value={sTitle} onChange={(e) => setSTitle(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
+                
+                {/* 宿泊・期間選択 */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[11px] font-bold text-slate-600">日程（連日・宿泊に対応）</span>
+                    <span className="text-[11px] text-amber-700 font-bold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                      {getDurationText(sStart, sEnd)}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <span className="text-[9px] text-slate-400 block mb-0.5">開始日</span>
+                      <input 
+                        type="date" 
+                        required 
+                        value={sStart} 
+                        onChange={(e) => {
+                          setSStart(e.target.value);
+                          if (e.target.value > sEnd) setSEnd(e.target.value);
+                        }} 
+                        className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs" 
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[9px] text-slate-400 block mb-0.5">終了日</span>
+                      <input 
+                        type="date" 
+                        required 
+                        min={sStart}
+                        value={sEnd} 
+                        onChange={(e) => setSEnd(e.target.value)} 
+                        className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs" 
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <span className="text-[10px] text-slate-400 block mb-0.5">時間（空欄の場合は終日）</span>
                   <input type="time" value={sTime} onChange={(e) => setSTime(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs" />
                 </div>
-                <input type="text" placeholder="メモ（夕飯不要など）" value={sMemo} onChange={(e) => setSMemo(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
+                <input type="text" placeholder="メモ（ホテル名、夕飯不要など）" value={sMemo} onChange={(e) => setSMemo(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
                 <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs">登録する</button>
               </form>
             </div>
           </div>
         )}
 
-        {/* ToDo追加モーダル */}
+        {}
         {openAddTodo && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -1154,14 +1295,14 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                <input type="text" required placeholder="品名（卵、洗剤など）" value={tName} onChange={(e) => setTName(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
+                <input type="text" required placeholder="品名（卵、牛乳、洗剤など）" value={tName} onChange={(e) => setTName(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
                 <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs">追加する</button>
               </form>
             </div>
           </div>
         )}
 
-        {/* ゴミ箱モーダル（30日間復元） */}
+        {}
         {openTrash && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
