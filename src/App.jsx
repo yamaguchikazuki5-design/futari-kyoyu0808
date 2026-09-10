@@ -29,10 +29,13 @@ import {
   List,
   Search,
   UtensilsCrossed,
-  Cloud
+  Cloud,
+  ExternalLink,
+  Edit2,
+  Loader2
 } from 'lucide-react';
 
-// --- お二人専用のFirebase接続情報 ---
+// --- お二人専用のFirebase接続設定 ---
 const firebaseConfig = {
   apiKey: "AIzaSyCS28uR8_rT9XHFwLWFZqzTNORVADSIdk",
   authDomain: "futari-note-0808.firebaseapp.com",
@@ -47,6 +50,7 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 const auth = getAuth(app);
 const db = getFirestore(app);
 
+// 色分けスタイル定義
 const STYLES = {
   '夫': {
     badge: 'bg-blue-100 text-blue-800 border-blue-300',
@@ -68,6 +72,7 @@ const STYLES = {
   }
 };
 
+// ローカルキャッシュ関数（オフライン保護）
 const loadLocal = (key, fallback) => {
   try {
     const v = localStorage.getItem('fn_' + key);
@@ -95,7 +100,7 @@ export default function App() {
     setToast(msg);
     setTimeout(() => {
       setToast((prev) => (prev === msg ? null : prev));
-    }, 2000);
+    }, 2200);
   };
 
   const today = new Date();
@@ -106,13 +111,14 @@ export default function App() {
   const [selDate, setSelDate] = useState(todayStr);
   const [vDate, setVDate] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
 
+  // 各データステート（端末保存から即時復元）
   const [scheds, setScheds] = useState(() => loadLocal('scheds', []));
   const [todos, setTodos] = useState(() => loadLocal('todos', []));
   const [recipes, setRecipes] = useState(() => loadLocal('recipes', []));
   const [trash, setTrash] = useState(() => loadLocal('trash', []));
-  const [freqs, setFreqs] = useState(() => loadLocal('freqs', ['牛乳', 'たまご', 'お米', '食パン', '納豆', '玉ねぎ', '豚肉']));
+  const [freqs, setFreqs] = useState(() => loadLocal('freqs', ['牛乳', 'たまご', 'お米', '食パン', '納豆', '玉ねぎ', '豚肉', 'トイレットペーパー']));
 
-  // 1. 匿名ログイン（バックグラウンドで自動実行）
+  // 1. Firebase 匿名認証
   useEffect(() => {
     signInAnonymously(auth).catch((err) => {
       console.warn('Auth note:', err.message);
@@ -164,7 +170,7 @@ export default function App() {
 
       unsubs = [unsubSched, unsubTodos, unsubRecipes, unsubTrash];
     } catch (e) {
-      console.error('Sync error:', e);
+      console.error('Sync init error:', e);
     }
 
     return () => {
@@ -172,6 +178,7 @@ export default function App() {
     };
   }, []);
 
+  // 予定用ステート
   const [openAddSched, setOpenAddSched] = useState(false);
   const [sTitle, setSTitle] = useState('');
   const [sStart, setSStart] = useState(todayStr);
@@ -180,14 +187,20 @@ export default function App() {
   const [sAuthor, setSAuthor] = useState('夫');
   const [sMemo, setSMemo] = useState('');
 
+  // ToDo用ステート
   const [openAddTodo, setOpenAddTodo] = useState(false);
   const [tName, setTName] = useState('');
   const [tAuthor, setTAuthor] = useState('妻');
 
-  const [openAddRecipe, setOpenAddRecipe] = useState(false);
-  const [rText, setRText] = useState('');
-  const [openTrash, setOpenTrash] = useState(false);
+  // レシピ用ステート
+  const [openAiModal, setOpenAiModal] = useState(false);
+  const [aiInput, setAiInput] = useState('');
+  const [isAiLoading, setIsAiLoading] = useState(false);
+  const [previewRecipe, setPreviewRecipe] = useState(null);
+  const [editingRecipe, setEditingRecipe] = useState(null);
+  const [recipeTab, setRecipeTab] = useState('ingredients');
   const [expRecipeId, setExpRecipeId] = useState(null);
+  const [openTrash, setOpenTrash] = useState(false);
   const [rQuery, setRQuery] = useState('');
 
   const cYear = vDate.getFullYear();
@@ -254,7 +267,7 @@ export default function App() {
     if (!txt) return;
 
     if (todos.some((t) => t.name === txt && !t.done)) {
-      showToast('既に買い物リストに入っています');
+      showToast('既に買い出しリストに入っています');
       return;
     }
 
@@ -274,7 +287,7 @@ export default function App() {
       setFreqs(nextFreqs);
       saveLocal('freqs', nextFreqs);
     }
-    showToast('「' + txt + '」を追加しました');
+    showToast('「' + txt + '」を買い出しに追加しました');
 
     try {
       await setDoc(doc(db, 'todos', item.id), item);
@@ -283,7 +296,7 @@ export default function App() {
     }
   };
 
-  // ToDoチェック
+  // ToDo完了トグル
   const handleToggleTodo = async (id) => {
     const target = todos.find((t) => t.id === id);
     if (!target) return;
@@ -306,7 +319,7 @@ export default function App() {
     const nextTodos = todos.filter((t) => t.id !== id);
     setTodos(nextTodos);
     saveLocal('todos', nextTodos);
-    showToast('項目を削除しました');
+    showToast('買い出し項目を削除しました');
 
     try {
       await deleteDoc(doc(db, 'todos', id));
@@ -315,63 +328,207 @@ export default function App() {
     }
   };
 
-  // レシピ追加
-  const handleAddRecipe = async (e) => {
-    e.preventDefault();
-    if (!rText.trim()) return;
+  // AIレシピ自動抽出（YouTube・TikTok・テキスト対応）
+  const handleAnalyzeAiRecipe = async () => {
+    const input = aiInput.trim();
+    if (!input) return;
 
-    const lines = rText.split('\n').map((l) => l.trim()).filter(Boolean);
-    let title = 'おすすめ料理';
-    const ings = [];
-    const steps = [];
+    setIsAiLoading(true);
+    let videoTitleHint = '';
 
-    lines.forEach((l) => {
-      if (l.indexOf('【') !== -1 && l.indexOf('】') !== -1) {
-        title = l.replace(/【|】/g, '');
-      } else if (l.match(/^[0-9]/) || l.indexOf('する') !== -1 || l.indexOf('炒める') !== -1 || l.indexOf('煮る') !== -1 || l.indexOf('焼く') !== -1) {
-        steps.push(l.replace(/^[0-9]+[\.、\)\s]/, ''));
-      } else {
-        ings.push(l.replace(/[・-]/g, ''));
+    // YouTube動画の場合、oEmbedからタイトルとチャンネル名を取得
+    if (input.includes('youtube.com') || input.includes('youtu.be')) {
+      try {
+        const oembedUrl = 'https://noembed.com/embed?url=' + encodeURIComponent(input);
+        const res = await fetch(oembedUrl);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.title) {
+            videoTitleHint = data.title + (data.author_name ? ' (' + data.author_name + ')' : '');
+          }
+        }
+      } catch (e) {
+        // oembed fallback
       }
-    });
+    }
 
-    const item = {
-      id: 'r_' + String(Date.now()),
-      title: title,
-      author: '共通',
-      ingredients: ings.length > 0 ? ings : ['材料を準備'],
-      steps: steps.length > 0 ? steps : ['材料を切って加熱調理する']
+    const apiKey = "";
+    const apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=' + apiKey;
+
+    const systemPrompt = "あなたは家庭向け料理レシピの専門家です。提供された動画URL、タイトル、説明文、またはテキストから料理名、食材（分量付き）、調味料（分量付き）、作り方工程を正確に抽出し、指定のJSON形式で出力してください。食材と調味料は明確に分類してください。";
+
+    const userPrompt = "以下の情報からレシピを抽出してください:\n" +
+      "【入力】: " + input + "\n" +
+      (videoTitleHint ? "【動画情報】: " + videoTitleHint + "\n" : "") +
+      "もしURLだけの場合は、Web検索を活用してその動画やレシピの内容を調べて展開してください。";
+
+    const payload = {
+      contents: [{ parts: [{ text: userPrompt }] }],
+      tools: [{ "google_search": {} }],
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            title: { type: "STRING" },
+            ingredients: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  name: { type: "STRING" },
+                  amount: { type: "STRING" }
+                },
+                required: ["name", "amount"]
+              }
+            },
+            seasonings: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  name: { type: "STRING" },
+                  amount: { type: "STRING" }
+                },
+                required: ["name", "amount"]
+              }
+            },
+            steps: {
+              type: "ARRAY",
+              items: { type: "STRING" }
+            }
+          },
+          required: ["title", "ingredients", "seasonings", "steps"]
+        }
+      }
     };
 
-    const nextRecipes = [item, ...recipes];
-    setRecipes(nextRecipes);
-    saveLocal('recipes', nextRecipes);
+    let resultJson = null;
+    const delays = [1000, 2000, 4000];
 
-    setExpRecipeId(item.id);
-    setRText('');
-    setOpenAddRecipe(false);
-    showToast('「' + title + '」を登録しました');
+    for (let i = 0; i <= delays.length; i++) {
+      try {
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (response.ok) {
+          const resData = await response.json();
+          const text = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) {
+            resultJson = JSON.parse(text);
+            break;
+          }
+        }
+      } catch (err) {
+        // retry on error
+      }
+      if (i < delays.length) {
+        await new Promise((r) => setTimeout(r, delays[i]));
+      }
+    }
+
+    // フォールバック: AI抽出が失敗した場合でも、テキストから簡易分解して救出
+    if (!resultJson || !resultJson.title) {
+      const lines = input.split('\n').map((l) => l.trim()).filter(Boolean);
+      let detectedTitle = videoTitleHint || '新しいレシピ';
+      const ings = [];
+      const seas = [];
+      const stps = [];
+
+      lines.forEach((l) => {
+        if (l.indexOf('【') !== -1 && l.indexOf('】') !== -1) {
+          detectedTitle = l.replace(/【|】/g, '');
+        } else if (l.includes('醤油') || l.includes('みりん') || l.includes('酒') || l.includes('塩') || l.includes('砂糖') || l.includes('油') || l.includes('大さじ') || l.includes('小さじ')) {
+          seas.push({ name: l.replace(/^[・\-\*]\s*/, ''), amount: '' });
+        } else if (l.match(/^[0-9]/) || l.includes('炒める') || l.includes('煮る') || l.includes('焼く') || l.includes('切る')) {
+          stps.push(l.replace(/^[0-9]+[\.、\)\s]/, ''));
+        } else if (!l.startsWith('http')) {
+          ings.push({ name: l.replace(/^[・\-\*]\s*/, ''), amount: '' });
+        }
+      });
+
+      resultJson = {
+        title: detectedTitle,
+        ingredients: ings.length > 0 ? ings : [{ name: '主な食材', amount: '適量' }],
+        seasonings: seas,
+        steps: stps.length > 0 ? stps : ['材料を切って調理する']
+      };
+    }
+
+    setIsAiLoading(false);
+
+    setPreviewRecipe({
+      id: 'r_' + String(Date.now()),
+      title: resultJson.title || '新しいレシピ',
+      author: '共通',
+      sourceUrl: input.startsWith('http') ? input : '',
+      ingredients: resultJson.ingredients || [],
+      seasonings: resultJson.seasonings || [],
+      steps: resultJson.steps || []
+    });
+
+    setOpenAiModal(false);
+    setAiInput('');
+  };
+
+  // プレビュー確定保存
+  const handleSavePreviewRecipe = async () => {
+    if (!previewRecipe) return;
+
+    const next = [previewRecipe, ...recipes];
+    setRecipes(next);
+    saveLocal('recipes', next);
+    setExpRecipeId(previewRecipe.id);
+    showToast('「' + previewRecipe.title + '」をレシピ帳に追加しました');
 
     try {
-      await setDoc(doc(db, 'recipes', item.id), item);
+      await setDoc(doc(db, 'recipes', previewRecipe.id), previewRecipe);
     } catch (err) {
-      console.warn('Cloud recipe error:', err);
+      console.warn('Cloud recipe save error:', err);
     }
+
+    setPreviewRecipe(null);
+  };
+
+  // レシピ編集保存
+  const handleSaveEditedRecipe = async (e) => {
+    e.preventDefault();
+    if (!editingRecipe) return;
+
+    const next = recipes.map((r) => (r.id === editingRecipe.id ? editingRecipe : r));
+    setRecipes(next);
+    saveLocal('recipes', next);
+    showToast('レシピを更新しました');
+
+    try {
+      await setDoc(doc(db, 'recipes', editingRecipe.id), editingRecipe);
+    } catch (err) {
+      console.warn('Cloud recipe update error:', err);
+    }
+
+    setEditingRecipe(null);
   };
 
   // レシピ削除（ゴミ箱へ移動）
-  const handleDelRecipe = async (id) => {
-    const item = recipes.find((r) => r.id === id);
-    if (!item) return;
-    const trashItem = { ...item, deletedAt: Date.now() };
+  const handleDelRecipe = async (id, e) => {
+    if (e && e.stopPropagation) e.stopPropagation();
+    const target = recipes.find((r) => r.id === id);
+    if (!target) return;
 
+    const trashItem = { ...target, deletedAt: Date.now() };
     const nextRecipes = recipes.filter((r) => r.id !== id);
     const nextTrash = [trashItem, ...trash];
+
     setRecipes(nextRecipes);
     setTrash(nextTrash);
     saveLocal('recipes', nextRecipes);
     saveLocal('trash', nextTrash);
-    showToast('ゴミ箱へ移動しました');
+    if (editingRecipe && editingRecipe.id === id) setEditingRecipe(null);
+    showToast('ゴミ箱へ移動しました（30日間復元可能）');
 
     try {
       await deleteDoc(doc(db, 'recipes', id));
@@ -383,20 +540,21 @@ export default function App() {
 
   // レシピ復元
   const handleRestoreRecipe = async (id) => {
-    const item = trash.find((r) => r.id === id);
-    if (!item) return;
+    const target = trash.find((r) => r.id === id);
+    if (!target) return;
 
     const nextTrash = trash.filter((r) => r.id !== id);
-    const nextRecipes = [item, ...recipes];
+    const nextRecipes = [target, ...recipes];
+
     setTrash(nextTrash);
     setRecipes(nextRecipes);
     saveLocal('trash', nextTrash);
     saveLocal('recipes', nextRecipes);
-    showToast('レシピを復元しました');
+    showToast('「' + target.title + '」をレシピ帳に復元しました');
 
     try {
       await deleteDoc(doc(db, 'trash', id));
-      await setDoc(doc(db, 'recipes', id), item);
+      await setDoc(doc(db, 'recipes', id), target);
     } catch (err) {
       console.warn('Cloud restore error:', err);
     }
@@ -431,12 +589,12 @@ export default function App() {
 
         {/* トースト通知 */}
         {toast && (
-          <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 bg-slate-800 text-white text-xs px-4 py-2 rounded-lg shadow-lg border border-slate-700">
+          <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 bg-slate-800 text-white text-xs px-4 py-2 rounded-lg shadow-lg border border-slate-700 whitespace-nowrap">
             {toast}
           </div>
         )}
 
-        {/* メインビュー */}
+        {/* メインコンテンツ */}
         <main className="flex-1 p-3 overflow-y-auto">
 
           {/* タブ1: スケジュール */}
@@ -632,13 +790,13 @@ export default function App() {
             </div>
           )}
 
-          {/* タブ3: レシピ帳 */}
+          {/* タブ3: レシピ帳（AI自動抽出・食材買い出し連携完備） */}
           {tab === 'recipe' && (
             <div className="space-y-3">
               <div className="flex gap-2">
                 <div className="relative flex-1">
                   <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <input type="text" placeholder="レシピ名で検索..." value={rQuery} onChange={(e) => setRQuery(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 py-2 text-xs focus:outline-none focus:border-slate-800" />
+                  <input type="text" placeholder="料理名や食材で検索..." value={rQuery} onChange={(e) => setRQuery(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 py-2 text-xs focus:outline-none focus:border-slate-800" />
                 </div>
                 {trash.length > 0 && (
                   <button onClick={() => setOpenTrash(true)} title="ゴミ箱" className="p-2 bg-white border border-slate-200 rounded-xl text-slate-600 relative shrink-0">
@@ -648,64 +806,309 @@ export default function App() {
                 )}
               </div>
 
-              <button onClick={() => setOpenAddRecipe(true)} className="w-full bg-slate-900 hover:bg-slate-800 text-white p-3 rounded-xl flex items-center justify-between text-xs font-bold shadow-xs">
-                <span className="flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-amber-300" />
-                  レシピテキストから自動登録
-                </span>
+              {/* AIレシピ自動抽出ボタン */}
+              <button onClick={() => setOpenAiModal(true)} className="w-full bg-slate-900 hover:bg-slate-800 text-white p-3 rounded-xl flex items-center justify-between text-xs font-bold shadow-xs transition">
+                <div className="flex items-center gap-2 text-left">
+                  <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
+                  <div>
+                    <div>動画URL・テキストからAIレシピ自動抽出</div>
+                    <div className="text-[10px] text-slate-300 font-normal">YouTube/TikTokの動画URLや概要欄から材料・手順を整理</div>
+                  </div>
+                </div>
                 <Plus className="w-4 h-4" />
               </button>
 
+              {/* レシピ一覧 */}
               <div className="space-y-2">
-                {recipes.filter((r) => r.title.indexOf(rQuery) !== -1).length === 0 ? (
+                {recipes.filter((r) => r.title.indexOf(rQuery) !== -1 || (r.ingredients && r.ingredients.some((i) => (i.name || i).includes(rQuery)))).length === 0 ? (
                   <div className="py-8 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">
                     {rQuery ? '一致するレシピはありません' : '登録されたレシピはありません'}
                   </div>
                 ) : (
-                  recipes.filter((r) => r.title.indexOf(rQuery) !== -1).map((recipe) => (
-                    <div key={recipe.id} className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-                      <div onClick={() => setExpRecipeId(expRecipeId === recipe.id ? null : recipe.id)} className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-slate-50">
-                        <div className="flex items-center gap-2">
-                          <UtensilsCrossed className="w-4 h-4 text-slate-400" />
-                          <div>
-                            <h3 className="font-bold text-sm text-slate-900">{recipe.title}</h3>
-                            <span className="text-[11px] text-slate-400">材料 {recipe.ingredients.length}個</span>
-                          </div>
-                        </div>
-                        <button onClick={(e) => { if (e && e.stopPropagation) e.stopPropagation(); handleDelRecipe(recipe.id); }} className="p-1.5 text-slate-300 hover:text-rose-500">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                      {expRecipeId === recipe.id && (
-                        <div className="p-3.5 border-t border-slate-100 bg-slate-50/50 space-y-3 text-xs">
-                          <div>
-                            <div className="font-bold text-slate-500 mb-1">材料（「買う」でToDoに追加）</div>
-                            <div className="space-y-1">
-                              {recipe.ingredients.map((ing, idx) => (
-                                <div key={idx} className="flex items-center justify-between p-1.5 bg-white rounded border border-slate-200">
-                                  <span>{ing}</span>
-                                  <button onClick={() => handleAddTodo(ing)} className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold text-[10px] flex items-center gap-1 hover:bg-slate-200">
-                                    <ShoppingCart className="w-3 h-3" />買う
-                                  </button>
-                                </div>
-                              ))}
+                  recipes.filter((r) => r.title.indexOf(rQuery) !== -1 || (r.ingredients && r.ingredients.some((i) => (i.name || i).includes(rQuery)))).map((recipe) => {
+                    const isExp = expRecipeId === recipe.id;
+                    const style = STYLES[recipe.author] || STYLES['共通'];
+                    return (
+                      <div key={recipe.id} className={'bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden ' + style.border}>
+                        <div onClick={() => setExpRecipeId(isExp ? null : recipe.id)} className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-slate-50">
+                          <div className="flex items-center gap-2">
+                            <UtensilsCrossed className="w-4 h-4 text-slate-400 shrink-0" />
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <h3 className="font-bold text-sm text-slate-900">{recipe.title}</h3>
+                                <span className={'text-[10px] px-1.5 py-0.2 rounded font-semibold border ' + style.badge}>{recipe.author}</span>
+                              </div>
+                              <div className="text-[11px] text-slate-400 mt-0.5">
+                                食材 {(recipe.ingredients || []).length}個 / 調味料 {(recipe.seasonings || []).length}個
+                              </div>
                             </div>
                           </div>
-                          <div>
-                            <div className="font-bold text-slate-500 mb-1">作り方</div>
-                            <ol className="list-decimal list-inside space-y-1 text-slate-700">
-                              {recipe.steps.map((st, idx) => <li key={idx}>{st}</li>)}
-                            </ol>
+                          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                            {recipe.sourceUrl && (
+                              <a href={recipe.sourceUrl} target="_blank" rel="noopener noreferrer" title="元動画・Webサイトを開く" className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg">
+                                <ExternalLink className="w-4 h-4" />
+                              </a>
+                            )}
+                            <button onClick={() => setEditingRecipe({ ...recipe })} title="レシピを編集" className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg">
+                              <Edit2 className="w-4 h-4" />
+                            </button>
                           </div>
                         </div>
-                      )}
-                    </div>
-                  ))
+
+                        {/* アコーディオン詳細表示 */}
+                        {isExp && (
+                          <div className="p-3.5 border-t border-slate-100 bg-slate-50/50 space-y-3 text-xs">
+                            <div className="flex bg-slate-200/70 p-0.5 rounded-lg text-xs">
+                              <button onClick={() => setRecipeTab('ingredients')} className={'flex-1 py-1 font-bold rounded ' + (recipeTab === 'ingredients' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500')}>
+                                食材・調味料
+                              </button>
+                              <button onClick={() => setRecipeTab('steps')} className={'flex-1 py-1 font-bold rounded ' + (recipeTab === 'steps' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500')}>
+                                作り方・工程 ({(recipe.steps || []).length})
+                              </button>
+                            </div>
+
+                            {recipeTab === 'ingredients' && (
+                              <div className="space-y-3">
+                                {/* 食材 */}
+                                <div>
+                                  <div className="font-bold text-slate-500 mb-1 flex justify-between items-center">
+                                    <span>食材</span>
+                                    <span className="text-[10px] text-slate-400">「買う」で買い出しToDoに追加</span>
+                                  </div>
+                                  <div className="space-y-1">
+                                    {(recipe.ingredients || []).map((ing, idx) => {
+                                      const name = typeof ing === 'string' ? ing : ing.name;
+                                      const amt = typeof ing === 'string' ? '' : ing.amount;
+                                      return (
+                                        <div key={idx} className="flex items-center justify-between p-1.5 bg-white rounded border border-slate-200">
+                                          <div className="flex items-center gap-1.5">
+                                            <span className="font-semibold text-slate-800">{name}</span>
+                                            {amt && <span className="text-slate-500 font-mono text-[11px]">({amt})</span>}
+                                          </div>
+                                          <button onClick={() => handleAddTodo(name)} className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold text-[10px] flex items-center gap-1 hover:bg-slate-200">
+                                            <ShoppingCart className="w-3 h-3" />買う
+                                          </button>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+
+                                {/* 調味料 */}
+                                {(recipe.seasonings && recipe.seasonings.length > 0) && (
+                                  <div>
+                                    <div className="font-bold text-slate-500 mb-1">調味料</div>
+                                    <div className="space-y-1">
+                                      {recipe.seasonings.map((sea, idx) => {
+                                        const name = typeof sea === 'string' ? sea : sea.name;
+                                        const amt = typeof sea === 'string' ? '' : sea.amount;
+                                        return (
+                                          <div key={idx} className="flex items-center justify-between p-1.5 bg-amber-50/60 rounded border border-amber-200/60 text-xs">
+                                            <div className="flex items-center gap-1.5">
+                                              <span className="font-semibold text-slate-800">{name}</span>
+                                              {amt && <span className="text-slate-600 font-mono text-[11px]">({amt})</span>}
+                                            </div>
+                                            <button onClick={() => handleAddTodo(name)} className="bg-white text-slate-700 px-2 py-0.5 rounded font-bold text-[10px] flex items-center gap-1 border border-slate-200 hover:bg-slate-50">
+                                              <ShoppingCart className="w-3 h-3" />買う
+                                            </button>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {recipeTab === 'steps' && (
+                              <ol className="list-decimal list-inside space-y-1.5 text-slate-700">
+                                {(recipe.steps || []).map((st, idx) => (
+                                  <li key={idx} className="p-1.5 bg-white rounded border border-slate-200 leading-relaxed">{st}</li>
+                                ))}
+                              </ol>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
                 )}
               </div>
             </div>
           )}
         </main>
+
+        {/* モーダル: AIレシピ自動抽出 */}
+        {openAiModal && (
+          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+            <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
+              <div className="flex justify-between items-center pb-2 border-b">
+                <div className="flex items-center gap-1.5">
+                  <Sparkles className="w-4 h-4 text-amber-500" />
+                  <h3 className="font-bold text-sm text-slate-800">動画URL・テキストから抽出</h3>
+                </div>
+                <button onClick={() => setOpenAiModal(false)}><X className="w-5 h-5 text-slate-400" /></button>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  YouTube / TikTok の動画URL、または概要欄テキストを貼り付けてください。AIが自動で料理名・食材・調味料・手順に分解します。
+                </p>
+                <textarea
+                  rows={5}
+                  placeholder={'例: https://youtu.be/...\nまたは概要欄のテキスト（豚バラ 200g、醤油 大さじ2...）'}
+                  value={aiInput}
+                  onChange={(e) => setAiInput(e.target.value)}
+                  className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none focus:border-slate-800"
+                />
+                <button
+                  onClick={handleAnalyzeAiRecipe}
+                  disabled={isAiLoading || !aiInput.trim()}
+                  className="w-full bg-slate-900 disabled:bg-slate-300 text-white font-bold py-2.5 rounded-lg text-xs flex items-center justify-center gap-1.5"
+                >
+                  {isAiLoading ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>AIがレシピを解析中...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                      <span>レシピを自動解析する</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* モーダル: 抽出結果のプレビュー＆微調整 */}
+        {previewRecipe && (
+          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+            <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3 max-h-[85vh] overflow-y-auto">
+              <div className="flex justify-between items-center pb-2 border-b">
+                <h3 className="font-bold text-sm">抽出結果の確認・微調整</h3>
+                <button onClick={() => setPreviewRecipe(null)}><X className="w-5 h-5 text-slate-400" /></button>
+              </div>
+
+              <div className="space-y-3 text-xs">
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500 block mb-1">料理名</label>
+                  <input
+                    type="text"
+                    value={previewRecipe.title}
+                    onChange={(e) => setPreviewRecipe({ ...previewRecipe, title: e.target.value })}
+                    className="w-full bg-slate-50 border rounded-lg p-2 font-bold focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500 block mb-1">記入者（色分け）</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {['夫', '妻', '共通'].map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => setPreviewRecipe({ ...previewRecipe, author: p })}
+                        className={'py-1.5 text-xs font-bold rounded-lg border ' + (previewRecipe.author === p ? STYLES[p].btn : 'bg-slate-50 text-slate-600')}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500 block mb-1">食材 ({previewRecipe.ingredients.length}個)</label>
+                  <div className="space-y-1 max-h-32 overflow-y-auto">
+                    {previewRecipe.ingredients.map((ing, idx) => (
+                      <div key={idx} className="flex gap-1">
+                        <input
+                          type="text"
+                          value={ing.name}
+                          onChange={(e) => {
+                            const copy = [...previewRecipe.ingredients];
+                            copy[idx].name = e.target.value;
+                            setPreviewRecipe({ ...previewRecipe, ingredients: copy });
+                          }}
+                          className="flex-1 bg-slate-50 border rounded p-1 text-xs"
+                        />
+                        <input
+                          type="text"
+                          placeholder="分量"
+                          value={ing.amount}
+                          onChange={(e) => {
+                            const copy = [...previewRecipe.ingredients];
+                            copy[idx].amount = e.target.value;
+                            setPreviewRecipe({ ...previewRecipe, ingredients: copy });
+                          }}
+                          className="w-20 bg-slate-50 border rounded p-1 text-xs"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleSavePreviewRecipe}
+                  className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs"
+                >
+                  この内容でレシピ帳に登録
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* レシピ編集モーダル */}
+        {editingRecipe && (
+          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+            <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
+              <div className="flex justify-between items-center pb-2 border-b">
+                <h3 className="font-bold text-sm">レシピを編集</h3>
+                <button onClick={() => setEditingRecipe(null)}><X className="w-5 h-5 text-slate-400" /></button>
+              </div>
+              <form onSubmit={handleSaveEditedRecipe} className="space-y-3">
+                <input
+                  type="text"
+                  required
+                  placeholder="料理名"
+                  value={editingRecipe.title}
+                  onChange={(e) => setEditingRecipe({ ...editingRecipe, title: e.target.value })}
+                  className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none"
+                />
+                <input
+                  type="url"
+                  placeholder="動画・Web URL"
+                  value={editingRecipe.sourceUrl || ''}
+                  onChange={(e) => setEditingRecipe({ ...editingRecipe, sourceUrl: e.target.value })}
+                  className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none"
+                />
+                <div className="grid grid-cols-3 gap-2">
+                  {['夫', '妻', '共通'].map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => setEditingRecipe({ ...editingRecipe, author: p })}
+                      className={'py-1.5 text-xs font-bold rounded-lg border ' + (editingRecipe.author === p ? STYLES[p].btn : 'bg-slate-50 text-slate-600')}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+                <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2 rounded-lg text-xs">変更を保存</button>
+                <button
+                  type="button"
+                  onClick={() => handleDelRecipe(editingRecipe.id)}
+                  className="w-full bg-rose-50 text-rose-600 border border-rose-200 font-bold py-2 rounded-lg text-xs flex items-center justify-center gap-1"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />このレシピを削除する
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
 
         {/* 予定追加モーダル */}
         {openAddSched && (
@@ -758,28 +1161,12 @@ export default function App() {
           </div>
         )}
 
-        {/* レシピ追加モーダル */}
-        {openAddRecipe && (
-          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-            <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
-              <div className="flex justify-between items-center pb-2 border-b">
-                <h3 className="font-bold text-sm">レシピを追加</h3>
-                <button onClick={() => setOpenAddRecipe(false)}><X className="w-5 h-5 text-slate-400" /></button>
-              </div>
-              <form onSubmit={handleAddRecipe} className="space-y-3">
-                <textarea rows={5} placeholder={'【料理名】\n豚肉 200g\n大根 半分\n1. 炒めて煮る'} value={rText} onChange={(e) => setRText(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
-                <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs">登録する</button>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {/* ゴミ箱モーダル */}
+        {/* ゴミ箱モーダル（30日間復元） */}
         {openTrash && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
               <div className="flex justify-between items-center pb-2 border-b">
-                <h3 className="font-bold text-sm">削除したレシピ</h3>
+                <h3 className="font-bold text-sm">削除したレシピ（復元可能）</h3>
                 <button onClick={() => setOpenTrash(false)}><X className="w-5 h-5 text-slate-400" /></button>
               </div>
               <div className="space-y-2 max-h-60 overflow-y-auto">
@@ -800,7 +1187,7 @@ export default function App() {
           </div>
         )}
 
-        {/* タブナビゲーション */}
+        {/* 下部固定タブナビゲーション */}
         <nav className="fixed bottom-0 w-full max-w-md bg-white border-t border-slate-200 flex justify-around py-2 px-3 z-40">
           <button onClick={() => setTab('schedule')} className={'flex flex-col items-center flex-1 py-1 ' + (tab === 'schedule' ? 'text-slate-900 font-bold' : 'text-slate-400')}>
             <CalendarIcon className="w-5 h-5" />
