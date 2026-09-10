@@ -1,4 +1,15 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp, getApps } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  deleteDoc, 
+  updateDoc, 
+  onSnapshot 
+} from 'firebase/firestore';
 import { 
   Calendar as CalendarIcon, 
   CheckSquare, 
@@ -14,12 +25,28 @@ import {
   ShoppingCart, 
   Sparkles, 
   RotateCcw,
-  CheckCircle2,
   CalendarDays,
   List,
   Search,
-  UtensilsCrossed
+  UtensilsCrossed,
+  Cloud,
+  CheckCircle2
 } from 'lucide-react';
+
+// --- お二人のFirebase設定 ---
+const firebaseConfig = {
+  apiKey: "AIzaSyCS28uR8_rT9XHFwLWFZqzTNDRVAD5Idk",
+  authDomain: "futari-note-0808.firebaseapp.com",
+  projectId: "futari-note-0808",
+  storageBucket: "futari-note-0808.firebasestorage.app",
+  messagingSenderId: "711781279684",
+  appId: "1:711781279684:web:ed27311969586001772691",
+  measurementId: "G-R4L0108045"
+};
+
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+const auth = getAuth(app);
+const db = getFirestore(app);
 
 const STYLES = {
   '夫': {
@@ -43,6 +70,7 @@ const STYLES = {
 };
 
 export default function App() {
+  const [currentUser, setCurrentUser] = useState(null);
   const [tab, setTab] = useState('schedule');
   const [calMode, setCalMode] = useState('month');
   const [toast, setToast] = useState(null);
@@ -54,23 +82,16 @@ export default function App() {
     }, 2000);
   };
 
-  const loadLocal = (key, fallback) => {
-    try {
-      const saved = window.localStorage.getItem('futari_' + key);
-      return saved ? JSON.parse(saved) : fallback;
-    } catch (e) {
-      console.warn('LocalStorage read error:', e);
-      return fallback;
-    }
-  };
-
-  const saveLocal = (key, val) => {
-    try {
-      window.localStorage.setItem('futari_' + key, JSON.stringify(val));
-    } catch (e) {
-      console.warn('LocalStorage write error:', e);
-    }
-  };
+  // 匿名自動ログイン（パスワード不要）
+  useEffect(() => {
+    signInAnonymously(auth).catch((err) => {
+      console.error('Auth error:', err);
+    });
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+    });
+    return () => unsubscribe();
+  }, []);
 
   const today = new Date();
   const todayStr = today.getFullYear() + '-' + 
@@ -80,18 +101,48 @@ export default function App() {
   const [selDate, setSelDate] = useState(todayStr);
   const [vDate, setVDate] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
 
-  // データ保存用ステート
-  const [scheds, setScheds] = useState(() => loadLocal('scheds', []));
-  const [todos, setTodos] = useState(() => loadLocal('todos', []));
-  const [recipes, setRecipes] = useState(() => loadLocal('recipes', []));
-  const [trash, setTrash] = useState(() => loadLocal('trash', []));
-  const [freqs, setFreqs] = useState(() => loadLocal('freqs', ['牛乳', 'たまご', 'お米', '食パン', '納豆', '玉ねぎ', '豚肉']));
+  // データ保存ステート（クラウドと即時同期）
+  const [scheds, setScheds] = useState([]);
+  const [todos, setTodos] = useState([]);
+  const [recipes, setRecipes] = useState([]);
+  const [trash, setTrash] = useState([]);
+  const [freqs, setFreqs] = useState(['牛乳', 'たまご', 'お米', '食パン', '納豆', '玉ねぎ', '豚肉']);
 
-  useEffect(() => saveLocal('scheds', scheds), [scheds]);
-  useEffect(() => saveLocal('todos', todos), [todos]);
-  useEffect(() => saveLocal('recipes', recipes), [recipes]);
-  useEffect(() => saveLocal('trash', trash), [trash]);
-  useEffect(() => saveLocal('freqs', freqs), [freqs]);
+  // Firestoreリアルタイム監視
+  useEffect(() => {
+    if (!currentUser) return;
+
+    const unsubSched = onSnapshot(collection(db, 'schedules'), (snap) => {
+      const list = [];
+      snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+      setScheds(list);
+    });
+
+    const unsubTodos = onSnapshot(collection(db, 'todos'), (snap) => {
+      const list = [];
+      snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+      setTodos(list);
+    });
+
+    const unsubRecipes = onSnapshot(collection(db, 'recipes'), (snap) => {
+      const list = [];
+      snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+      setRecipes(list);
+    });
+
+    const unsubTrash = onSnapshot(collection(db, 'trash'), (snap) => {
+      const list = [];
+      snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+      setTrash(list);
+    });
+
+    return () => {
+      unsubSched();
+      unsubTodos();
+      unsubRecipes();
+      unsubTrash();
+    };
+  }, [currentUser]);
 
   // 予定モーダル
   const [openAddSched, setOpenAddSched] = useState(false);
@@ -119,7 +170,8 @@ export default function App() {
   const firstDay = new Date(cYear, cMonth, 1).getDay();
   const daysInMonth = new Date(cYear, cMonth + 1, 0).getDate();
 
-  const handleAddSched = (e) => {
+  // 予定の追加
+  const handleAddSched = async (e) => {
     e.preventDefault();
     if (!sTitle.trim()) return;
 
@@ -139,12 +191,21 @@ export default function App() {
     setSTime('');
     setOpenAddSched(false);
     showToast('予定を登録しました');
+
+    if (currentUser) {
+      await setDoc(doc(db, 'schedules', item.id), item).catch(console.error);
+    }
   };
 
-  const handleDelSched = (id, e) => {
+  // 予定の削除
+  const handleDelSched = async (id, e) => {
     if (e && e.stopPropagation) e.stopPropagation();
     setScheds((prev) => prev.filter((x) => x.id !== id));
     showToast('予定を削除しました');
+
+    if (currentUser) {
+      await deleteDoc(doc(db, 'schedules', id)).catch(console.error);
+    }
   };
 
   const dayScheds = useMemo(() => {
@@ -153,7 +214,8 @@ export default function App() {
       .sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
   }, [scheds, selDate]);
 
-  const handleAddTodo = (name, author = '共通') => {
+  // ToDoの追加
+  const handleAddTodo = async (name, author = '共通') => {
     const txt = name.trim();
     if (!txt) return;
 
@@ -174,19 +236,38 @@ export default function App() {
       setFreqs((prev) => [txt, ...prev.slice(0, 14)]);
     }
     showToast('「' + txt + '」を追加しました');
+
+    if (currentUser) {
+      await setDoc(doc(db, 'todos', item.id), item).catch(console.error);
+    }
   };
 
-  const handleToggleTodo = (id) => {
-    setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: !t.done } : t)));
+  // ToDoチェック
+  const handleToggleTodo = async (id) => {
+    const target = todos.find((t) => t.id === id);
+    if (!target) return;
+    const nextDone = !target.done;
+
+    setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: nextDone } : t)));
+
+    if (currentUser) {
+      await updateDoc(doc(db, 'todos', id), { done: nextDone }).catch(console.error);
+    }
   };
 
-  const handleDelTodo = (id, e) => {
+  // ToDo削除
+  const handleDelTodo = async (id, e) => {
     if (e && e.stopPropagation) e.stopPropagation();
     setTodos((prev) => prev.filter((t) => t.id !== id));
     showToast('項目を削除しました');
+
+    if (currentUser) {
+      await deleteDoc(doc(db, 'todos', id)).catch(console.error);
+    }
   };
 
-  const handleAddRecipe = (e) => {
+  // レシピ追加
+  const handleAddRecipe = async (e) => {
     e.preventDefault();
     if (!rText.trim()) return;
 
@@ -218,22 +299,41 @@ export default function App() {
     setRText('');
     setOpenAddRecipe(false);
     showToast('「' + title + '」を登録しました');
+
+    if (currentUser) {
+      await setDoc(doc(db, 'recipes', item.id), item).catch(console.error);
+    }
   };
 
-  const handleDelRecipe = (id) => {
+  // レシピ削除
+  const handleDelRecipe = async (id) => {
     const item = recipes.find((r) => r.id === id);
     if (!item) return;
+    const trashItem = { ...item, deletedAt: Date.now() };
+
     setRecipes((prev) => prev.filter((r) => r.id !== id));
-    setTrash((prev) => [{ ...item, deletedAt: Date.now() }, ...prev]);
+    setTrash((prev) => [trashItem, ...prev]);
     showToast('ゴミ箱へ移動しました');
+
+    if (currentUser) {
+      await deleteDoc(doc(db, 'recipes', id)).catch(console.error);
+      await setDoc(doc(db, 'trash', id), trashItem).catch(console.error);
+    }
   };
 
-  const handleRestoreRecipe = (id) => {
+  // レシピ復元
+  const handleRestoreRecipe = async (id) => {
     const item = trash.find((r) => r.id === id);
     if (!item) return;
+
     setTrash((prev) => prev.filter((r) => r.id !== id));
     setRecipes((prev) => [item, ...prev]);
     showToast('レシピを復元しました');
+
+    if (currentUser) {
+      await deleteDoc(doc(db, 'trash', id)).catch(console.error);
+      await setDoc(doc(db, 'recipes', id), item).catch(console.error);
+    }
   };
 
   return (
@@ -244,10 +344,17 @@ export default function App() {
         <header className="bg-slate-900 text-white px-4 py-3 sticky top-0 z-30 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <h1 className="text-base font-bold">ふたり手帳</h1>
-            <span className="flex items-center gap-1 text-[10px] bg-amber-950/80 text-amber-300 px-2 py-0.5 rounded-full border border-amber-700">
-              <CheckCircle2 className="w-2.5 h-2.5 text-amber-400" />
-              端末保存中
-            </span>
+            {currentUser ? (
+              <span className="flex items-center gap-1 text-[10px] bg-emerald-950/80 text-emerald-300 px-2 py-0.5 rounded-full border border-emerald-700">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                クラウド同期中
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full border border-slate-700">
+                <Cloud className="w-2.5 h-2.5" />
+                接続準備中...
+              </span>
+            )}
           </div>
           <div className="flex gap-2 text-[11px]">
             <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500"></span>夫</span>
@@ -266,10 +373,9 @@ export default function App() {
         {/* メインビュー */}
         <main className="flex-1 p-3 overflow-y-auto">
 
-          {}
+          {/* タブ1: スケジュール */}
           {tab === 'schedule' && (
             <div className="space-y-3">
-              {/* 年月切り替え＆表示切替バー */}
               <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-xs">
                 <div className="flex items-center gap-2">
                   <button onClick={() => setVDate(new Date(cYear, cMonth - 1, 1))} className="p-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">
@@ -292,7 +398,6 @@ export default function App() {
 
               {calMode === 'month' ? (
                 <>
-                  {/* カレンダー本体 */}
                   <div className="bg-white border border-slate-200 rounded-xl p-2 shadow-xs">
                     <div className="grid grid-cols-7 text-center text-[11px] font-semibold text-slate-400 py-1 border-b border-slate-100">
                       <span className="text-rose-500">日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span className="text-blue-500">土</span>
@@ -327,7 +432,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* 選択日の予定一覧 */}
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-xs font-bold text-slate-600 flex items-center gap-1">
@@ -364,7 +468,6 @@ export default function App() {
                   </div>
                 </>
               ) : (
-                /* 全予定一覧 */
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-slate-600">全予定 ({scheds.length}件)</span>
@@ -398,10 +501,9 @@ export default function App() {
             </div>
           )}
 
-          {}
+          {/* タブ2: 買い出しToDo */}
           {tab === 'todo' && (
             <div className="space-y-3">
-              {/* よく買うもの */}
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
                 <div className="text-xs font-bold text-slate-700 mb-2">よく買うもの（タップで追加）</div>
                 <div className="flex flex-wrap gap-1.5">
@@ -413,7 +515,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 買うものリストヘッダー */}
               <div className="flex items-center justify-between pt-1">
                 <span className="font-bold text-sm text-slate-800">買うもの一覧（{todos.filter((t) => !t.done).length}件）</span>
                 <button onClick={() => setOpenAddTodo(true)} className="flex items-center gap-1 bg-slate-900 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-slate-800">
@@ -421,7 +522,6 @@ export default function App() {
                 </button>
               </div>
 
-              {/* 未購入リスト */}
               <div className="space-y-2">
                 {todos.filter((t) => !t.done).length === 0 ? (
                   <div className="py-8 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">
@@ -444,7 +544,6 @@ export default function App() {
                   ))
                 )}
 
-                {/* 購入済みリスト */}
                 {todos.filter((t) => t.done).length > 0 && (
                   <div className="pt-2">
                     <div className="text-[11px] font-bold text-slate-400 mb-1">購入済み ({todos.filter((t) => t.done).length})</div>
@@ -467,10 +566,9 @@ export default function App() {
             </div>
           )}
 
-          {}
+          {/* タブ3: レシピ帳 */}
           {tab === 'recipe' && (
             <div className="space-y-3">
-              {/* 検索バー */}
               <div className="flex gap-2">
                 <div className="relative flex-1">
                   <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -484,7 +582,6 @@ export default function App() {
                 )}
               </div>
 
-              {/* レシピ登録ボタン */}
               <button onClick={() => setOpenAddRecipe(true)} className="w-full bg-slate-900 hover:bg-slate-800 text-white p-3 rounded-xl flex items-center justify-between text-xs font-bold shadow-xs">
                 <span className="flex items-center gap-1.5">
                   <Sparkles className="w-4 h-4 text-amber-300" />
@@ -493,7 +590,6 @@ export default function App() {
                 <Plus className="w-4 h-4" />
               </button>
 
-              {/* レシピ一覧 */}
               <div className="space-y-2">
                 {recipes.filter((r) => r.title.indexOf(rQuery) !== -1).length === 0 ? (
                   <div className="py-8 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">
@@ -545,7 +641,7 @@ export default function App() {
           )}
         </main>
 
-        {}
+        {/* 予定モーダル */}
         {openAddSched && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -573,7 +669,7 @@ export default function App() {
           </div>
         )}
 
-        {}
+        {/* ToDoモーダル */}
         {openAddTodo && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -596,7 +692,7 @@ export default function App() {
           </div>
         )}
 
-        {}
+        {/* レシピ追加モーダル */}
         {openAddRecipe && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -612,7 +708,7 @@ export default function App() {
           </div>
         )}
 
-        {}
+        {/* ゴミ箱モーダル */}
         {openTrash && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -638,7 +734,7 @@ export default function App() {
           </div>
         )}
 
-        {}
+        {/* ナビゲーションバー */}
         <nav className="fixed bottom-0 w-full max-w-md bg-white border-t border-slate-200 flex justify-around py-2 px-3 z-40">
           <button onClick={() => setTab('schedule')} className={'flex flex-col items-center flex-1 py-1 ' + (tab === 'schedule' ? 'text-slate-900 font-bold' : 'text-slate-400')}>
             <CalendarIcon className="w-5 h-5" />
