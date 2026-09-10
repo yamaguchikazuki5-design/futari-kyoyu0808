@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp, getApps } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import { getAuth, signInAnonymously } from 'firebase/auth';
 import { 
   getFirestore, 
   collection, 
@@ -29,13 +29,12 @@ import {
   List,
   Search,
   UtensilsCrossed,
-  Cloud,
-  CheckCircle2
+  Cloud
 } from 'lucide-react';
 
-// --- お二人のFirebase設定 ---
+// --- お二人専用のFirebase接続情報 ---
 const firebaseConfig = {
-  apiKey: "AIzaSyCS28uR8_rT9XHFwLWFZqzTNDRVAD5Idk",
+  apiKey: "AIzaSyCS28uR8_rT9XHFwLWFZqzTNORVADSIdk",
   authDomain: "futari-note-0808.firebaseapp.com",
   projectId: "futari-note-0808",
   storageBucket: "futari-note-0808.firebasestorage.app",
@@ -44,7 +43,7 @@ const firebaseConfig = {
   measurementId: "G-R4L0108045"
 };
 
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 const auth = getAuth(app);
 const db = getFirestore(app);
 
@@ -69,11 +68,28 @@ const STYLES = {
   }
 };
 
+const loadLocal = (key, fallback) => {
+  try {
+    const v = localStorage.getItem('fn_' + key);
+    return v ? JSON.parse(v) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+};
+
+const saveLocal = (key, val) => {
+  try {
+    localStorage.setItem('fn_' + key, JSON.stringify(val));
+  } catch (e) {
+    // ignore
+  }
+};
+
 export default function App() {
-  const [currentUser, setCurrentUser] = useState(null);
   const [tab, setTab] = useState('schedule');
   const [calMode, setCalMode] = useState('month');
   const [toast, setToast] = useState(null);
+  const [syncStatus, setSyncStatus] = useState('connecting');
 
   const showToast = (msg) => {
     setToast(msg);
@@ -81,17 +97,6 @@ export default function App() {
       setToast((prev) => (prev === msg ? null : prev));
     }, 2000);
   };
-
-  // 匿名自動ログイン（パスワード不要）
-  useEffect(() => {
-    signInAnonymously(auth).catch((err) => {
-      console.error('Auth error:', err);
-    });
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setCurrentUser(user);
-    });
-    return () => unsubscribe();
-  }, []);
 
   const today = new Date();
   const todayStr = today.getFullYear() + '-' + 
@@ -101,50 +106,72 @@ export default function App() {
   const [selDate, setSelDate] = useState(todayStr);
   const [vDate, setVDate] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
 
-  // データ保存ステート（クラウドと即時同期）
-  const [scheds, setScheds] = useState([]);
-  const [todos, setTodos] = useState([]);
-  const [recipes, setRecipes] = useState([]);
-  const [trash, setTrash] = useState([]);
-  const [freqs, setFreqs] = useState(['牛乳', 'たまご', 'お米', '食パン', '納豆', '玉ねぎ', '豚肉']);
+  const [scheds, setScheds] = useState(() => loadLocal('scheds', []));
+  const [todos, setTodos] = useState(() => loadLocal('todos', []));
+  const [recipes, setRecipes] = useState(() => loadLocal('recipes', []));
+  const [trash, setTrash] = useState(() => loadLocal('trash', []));
+  const [freqs, setFreqs] = useState(() => loadLocal('freqs', ['牛乳', 'たまご', 'お米', '食パン', '納豆', '玉ねぎ', '豚肉']));
 
-  // Firestoreリアルタイム監視
+  // 1. 匿名ログイン（バックグラウンドで自動実行）
   useEffect(() => {
-    if (!currentUser) return;
-
-    const unsubSched = onSnapshot(collection(db, 'schedules'), (snap) => {
-      const list = [];
-      snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
-      setScheds(list);
+    signInAnonymously(auth).catch((err) => {
+      console.warn('Auth note:', err.message);
     });
+  }, []);
 
-    const unsubTodos = onSnapshot(collection(db, 'todos'), (snap) => {
-      const list = [];
-      snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
-      setTodos(list);
-    });
+  // 2. クラウド（Firestore）とのリアルタイム同期
+  useEffect(() => {
+    let unsubs = [];
+    try {
+      const unsubSched = onSnapshot(collection(db, 'schedules'), (snap) => {
+        const list = [];
+        snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+        setScheds(list);
+        saveLocal('scheds', list);
+        setSyncStatus('connected');
+      }, (err) => {
+        console.warn('Sched error:', err);
+      });
 
-    const unsubRecipes = onSnapshot(collection(db, 'recipes'), (snap) => {
-      const list = [];
-      snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
-      setRecipes(list);
-    });
+      const unsubTodos = onSnapshot(collection(db, 'todos'), (snap) => {
+        const list = [];
+        snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+        setTodos(list);
+        saveLocal('todos', list);
+        setSyncStatus('connected');
+      }, (err) => {
+        console.warn('Todos error:', err);
+      });
 
-    const unsubTrash = onSnapshot(collection(db, 'trash'), (snap) => {
-      const list = [];
-      snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
-      setTrash(list);
-    });
+      const unsubRecipes = onSnapshot(collection(db, 'recipes'), (snap) => {
+        const list = [];
+        snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+        setRecipes(list);
+        saveLocal('recipes', list);
+        setSyncStatus('connected');
+      }, (err) => {
+        console.warn('Recipes error:', err);
+      });
+
+      const unsubTrash = onSnapshot(collection(db, 'trash'), (snap) => {
+        const list = [];
+        snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+        setTrash(list);
+        saveLocal('trash', list);
+      }, (err) => {
+        console.warn('Trash error:', err);
+      });
+
+      unsubs = [unsubSched, unsubTodos, unsubRecipes, unsubTrash];
+    } catch (e) {
+      console.error('Sync error:', e);
+    }
 
     return () => {
-      unsubSched();
-      unsubTodos();
-      unsubRecipes();
-      unsubTrash();
+      unsubs.forEach((u) => u && u());
     };
-  }, [currentUser]);
+  }, []);
 
-  // 予定モーダル
   const [openAddSched, setOpenAddSched] = useState(false);
   const [sTitle, setSTitle] = useState('');
   const [sStart, setSStart] = useState(todayStr);
@@ -153,12 +180,10 @@ export default function App() {
   const [sAuthor, setSAuthor] = useState('夫');
   const [sMemo, setSMemo] = useState('');
 
-  // ToDoモーダル
   const [openAddTodo, setOpenAddTodo] = useState(false);
   const [tName, setTName] = useState('');
   const [tAuthor, setTAuthor] = useState('妻');
 
-  // レシピ帳ステート
   const [openAddRecipe, setOpenAddRecipe] = useState(false);
   const [rText, setRText] = useState('');
   const [openTrash, setOpenTrash] = useState(false);
@@ -170,7 +195,7 @@ export default function App() {
   const firstDay = new Date(cYear, cMonth, 1).getDay();
   const daysInMonth = new Date(cYear, cMonth + 1, 0).getDate();
 
-  // 予定の追加
+  // スケジュール登録
   const handleAddSched = async (e) => {
     e.preventDefault();
     if (!sTitle.trim()) return;
@@ -185,26 +210,35 @@ export default function App() {
       memo: sMemo.trim()
     };
 
-    setScheds((prev) => [...prev, item]);
+    const next = [...scheds, item];
+    setScheds(next);
+    saveLocal('scheds', next);
+
     setSTitle('');
     setSMemo('');
     setSTime('');
     setOpenAddSched(false);
     showToast('予定を登録しました');
 
-    if (currentUser) {
-      await setDoc(doc(db, 'schedules', item.id), item).catch(console.error);
+    try {
+      await setDoc(doc(db, 'schedules', item.id), item);
+    } catch (err) {
+      console.warn('Cloud save fallback:', err);
     }
   };
 
-  // 予定の削除
+  // スケジュール削除
   const handleDelSched = async (id, e) => {
     if (e && e.stopPropagation) e.stopPropagation();
-    setScheds((prev) => prev.filter((x) => x.id !== id));
+    const next = scheds.filter((x) => x.id !== id);
+    setScheds(next);
+    saveLocal('scheds', next);
     showToast('予定を削除しました');
 
-    if (currentUser) {
-      await deleteDoc(doc(db, 'schedules', id)).catch(console.error);
+    try {
+      await deleteDoc(doc(db, 'schedules', id));
+    } catch (err) {
+      console.warn('Cloud del fallback:', err);
     }
   };
 
@@ -214,7 +248,7 @@ export default function App() {
       .sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
   }, [scheds, selDate]);
 
-  // ToDoの追加
+  // ToDo追加
   const handleAddTodo = async (name, author = '共通') => {
     const txt = name.trim();
     if (!txt) return;
@@ -231,14 +265,21 @@ export default function App() {
       done: false 
     };
 
-    setTodos((prev) => [item, ...prev]);
+    const nextTodos = [item, ...todos];
+    setTodos(nextTodos);
+    saveLocal('todos', nextTodos);
+
     if (!freqs.includes(txt)) {
-      setFreqs((prev) => [txt, ...prev.slice(0, 14)]);
+      const nextFreqs = [txt, ...freqs.slice(0, 14)];
+      setFreqs(nextFreqs);
+      saveLocal('freqs', nextFreqs);
     }
     showToast('「' + txt + '」を追加しました');
 
-    if (currentUser) {
-      await setDoc(doc(db, 'todos', item.id), item).catch(console.error);
+    try {
+      await setDoc(doc(db, 'todos', item.id), item);
+    } catch (err) {
+      console.warn('Cloud todo error:', err);
     }
   };
 
@@ -248,21 +289,29 @@ export default function App() {
     if (!target) return;
     const nextDone = !target.done;
 
-    setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: nextDone } : t)));
+    const nextTodos = todos.map((t) => (t.id === id ? { ...t, done: nextDone } : t));
+    setTodos(nextTodos);
+    saveLocal('todos', nextTodos);
 
-    if (currentUser) {
-      await updateDoc(doc(db, 'todos', id), { done: nextDone }).catch(console.error);
+    try {
+      await updateDoc(doc(db, 'todos', id), { done: nextDone });
+    } catch (err) {
+      console.warn('Cloud toggle error:', err);
     }
   };
 
   // ToDo削除
   const handleDelTodo = async (id, e) => {
     if (e && e.stopPropagation) e.stopPropagation();
-    setTodos((prev) => prev.filter((t) => t.id !== id));
+    const nextTodos = todos.filter((t) => t.id !== id);
+    setTodos(nextTodos);
+    saveLocal('todos', nextTodos);
     showToast('項目を削除しました');
 
-    if (currentUser) {
-      await deleteDoc(doc(db, 'todos', id)).catch(console.error);
+    try {
+      await deleteDoc(doc(db, 'todos', id));
+    } catch (err) {
+      console.warn('Cloud todo del error:', err);
     }
   };
 
@@ -294,30 +343,41 @@ export default function App() {
       steps: steps.length > 0 ? steps : ['材料を切って加熱調理する']
     };
 
-    setRecipes((prev) => [item, ...prev]);
+    const nextRecipes = [item, ...recipes];
+    setRecipes(nextRecipes);
+    saveLocal('recipes', nextRecipes);
+
     setExpRecipeId(item.id);
     setRText('');
     setOpenAddRecipe(false);
     showToast('「' + title + '」を登録しました');
 
-    if (currentUser) {
-      await setDoc(doc(db, 'recipes', item.id), item).catch(console.error);
+    try {
+      await setDoc(doc(db, 'recipes', item.id), item);
+    } catch (err) {
+      console.warn('Cloud recipe error:', err);
     }
   };
 
-  // レシピ削除
+  // レシピ削除（ゴミ箱へ移動）
   const handleDelRecipe = async (id) => {
     const item = recipes.find((r) => r.id === id);
     if (!item) return;
     const trashItem = { ...item, deletedAt: Date.now() };
 
-    setRecipes((prev) => prev.filter((r) => r.id !== id));
-    setTrash((prev) => [trashItem, ...prev]);
+    const nextRecipes = recipes.filter((r) => r.id !== id);
+    const nextTrash = [trashItem, ...trash];
+    setRecipes(nextRecipes);
+    setTrash(nextTrash);
+    saveLocal('recipes', nextRecipes);
+    saveLocal('trash', nextTrash);
     showToast('ゴミ箱へ移動しました');
 
-    if (currentUser) {
-      await deleteDoc(doc(db, 'recipes', id)).catch(console.error);
-      await setDoc(doc(db, 'trash', id), trashItem).catch(console.error);
+    try {
+      await deleteDoc(doc(db, 'recipes', id));
+      await setDoc(doc(db, 'trash', id), trashItem);
+    } catch (err) {
+      console.warn('Cloud trash error:', err);
     }
   };
 
@@ -326,13 +386,19 @@ export default function App() {
     const item = trash.find((r) => r.id === id);
     if (!item) return;
 
-    setTrash((prev) => prev.filter((r) => r.id !== id));
-    setRecipes((prev) => [item, ...prev]);
+    const nextTrash = trash.filter((r) => r.id !== id);
+    const nextRecipes = [item, ...recipes];
+    setTrash(nextTrash);
+    setRecipes(nextRecipes);
+    saveLocal('trash', nextTrash);
+    saveLocal('recipes', nextRecipes);
     showToast('レシピを復元しました');
 
-    if (currentUser) {
-      await deleteDoc(doc(db, 'trash', id)).catch(console.error);
-      await setDoc(doc(db, 'recipes', id), item).catch(console.error);
+    try {
+      await deleteDoc(doc(db, 'trash', id));
+      await setDoc(doc(db, 'recipes', id), item);
+    } catch (err) {
+      console.warn('Cloud restore error:', err);
     }
   };
 
@@ -344,15 +410,15 @@ export default function App() {
         <header className="bg-slate-900 text-white px-4 py-3 sticky top-0 z-30 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <h1 className="text-base font-bold">ふたり手帳</h1>
-            {currentUser ? (
+            {syncStatus === 'connected' ? (
               <span className="flex items-center gap-1 text-[10px] bg-emerald-950/80 text-emerald-300 px-2 py-0.5 rounded-full border border-emerald-700">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
                 クラウド同期中
               </span>
             ) : (
-              <span className="flex items-center gap-1 text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full border border-slate-700">
-                <Cloud className="w-2.5 h-2.5" />
-                接続準備中...
+              <span className="flex items-center gap-1 text-[10px] bg-amber-950/80 text-amber-300 px-2 py-0.5 rounded-full border border-amber-700">
+                <Cloud className="w-2.5 h-2.5 animate-pulse" />
+                クラウド接続中...
               </span>
             )}
           </div>
@@ -641,7 +707,7 @@ export default function App() {
           )}
         </main>
 
-        {/* 予定モーダル */}
+        {/* 予定追加モーダル */}
         {openAddSched && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -669,7 +735,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ToDoモーダル */}
+        {/* ToDo追加モーダル */}
         {openAddTodo && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -734,7 +800,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ナビゲーションバー */}
+        {/* タブナビゲーション */}
         <nav className="fixed bottom-0 w-full max-w-md bg-white border-t border-slate-200 flex justify-around py-2 px-3 z-40">
           <button onClick={() => setTab('schedule')} className={'flex flex-col items-center flex-1 py-1 ' + (tab === 'schedule' ? 'text-slate-900 font-bold' : 'text-slate-400')}>
             <CalendarIcon className="w-5 h-5" />
