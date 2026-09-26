@@ -33,7 +33,8 @@ import {
   ExternalLink,
   Edit2,
   Loader2,
-  Luggage
+  Luggage,
+  ListTodo
 } from 'lucide-react';
 
 // --- お二人専用のFirebase接続設定 ---
@@ -164,7 +165,9 @@ export default function App() {
     return () => unsubs.forEach((u) => u && u());
   }, []);
 
+  // 予定ステート・モーダル
   const [openAddSched, setOpenAddSched] = useState(false);
+  const [editingSched, setEditingSched] = useState(null);
   const [sTitle, setSTitle] = useState('');
   const [sStart, setSStart] = useState(todayStr);
   const [sEnd, setSEnd] = useState(todayStr);
@@ -187,6 +190,16 @@ export default function App() {
   const cMonth = vDate.getMonth();
   const firstDay = new Date(cYear, cMonth, 1).getDay();
   const daysInMonth = new Date(cYear, cMonth + 1, 0).getDate();
+
+  // 年・月ジャンプ用選択肢の生成
+  const yearOptions = useMemo(() => {
+    const curr = new Date().getFullYear();
+    const years = [];
+    for (let y = curr - 3; y <= curr + 5; y++) {
+      years.push(y);
+    }
+    return years;
+  }, []);
 
   const handleAddSched = async (e) => {
     e.preventDefault();
@@ -221,6 +234,32 @@ export default function App() {
     } catch (err) {}
   };
 
+  const handleSaveEditSched = async (e) => {
+    e.preventDefault();
+    if (!editingSched || !editingSched.title.trim()) return;
+
+    const finalEnd = editingSched.endDate < editingSched.startDate ? editingSched.startDate : editingSched.endDate;
+    const isMultiDay = finalEnd > editingSched.startDate;
+
+    const updated = {
+      ...editingSched,
+      title: editingSched.title.trim(),
+      endDate: finalEnd,
+      isMultiDay: isMultiDay,
+      memo: (editingSched.memo || '').trim()
+    };
+
+    const next = scheds.map((s) => (s.id === updated.id ? updated : s));
+    setScheds(next);
+    saveLocal('scheds', next);
+    setEditingSched(null);
+    showToast('予定を更新しました');
+
+    try {
+      await setDoc(doc(db, 'schedules', updated.id), updated);
+    } catch (err) {}
+  };
+
   const handleDelSched = async (id, e) => {
     if (e && e.stopPropagation) e.stopPropagation();
     const next = scheds.filter((x) => x.id !== id);
@@ -243,16 +282,18 @@ export default function App() {
       });
   }, [scheds, selDate]);
 
+  // ToDoステート（買出し / やること のタイプ対応）
+  const [todoSubTab, setTodoSubTab] = useState('shopping'); // 'shopping' | 'task'
   const [openAddTodo, setOpenAddTodo] = useState(false);
   const [tName, setTName] = useState('');
   const [tAuthor, setTAuthor] = useState('共通');
 
-  const handleAddTodo = async (name, author = '共通') => {
+  const handleAddTodo = async (name, author = '共通', type = todoSubTab) => {
     const txt = name.trim();
     if (!txt) return;
 
-    if (todos.some((t) => t.name === txt && !t.done)) {
-      showToast('「' + txt + '」は既に買い出しリストに入っています');
+    if (todos.some((t) => t.name === txt && !t.done && (t.type || 'shopping') === type)) {
+      showToast('「' + txt + '」は既にリストに入っています');
       return;
     }
 
@@ -260,6 +301,7 @@ export default function App() {
       id: 't_' + String(Date.now()) + Math.random().toString(36).slice(2, 5), 
       name: txt, 
       author, 
+      type: type,
       done: false 
     };
 
@@ -267,12 +309,12 @@ export default function App() {
     setTodos(nextTodos);
     saveLocal('todos', nextTodos);
 
-    if (!freqs.includes(txt)) {
+    if (type === 'shopping' && !freqs.includes(txt)) {
       const nextFreqs = [txt, ...freqs.slice(0, 14)];
       setFreqs(nextFreqs);
       saveLocal('freqs', nextFreqs);
     }
-    showToast('「' + txt + '」を買い出しに追加しました');
+    showToast('「' + txt + '」を' + (type === 'shopping' ? '買出し' : 'やること') + 'に追加しました');
 
     try {
       await setDoc(doc(db, 'todos', item.id), item);
@@ -298,13 +340,14 @@ export default function App() {
     const nextTodos = todos.filter((t) => t.id !== id);
     setTodos(nextTodos);
     saveLocal('todos', nextTodos);
-    showToast('買い出し項目を削除しました');
+    showToast('項目を削除しました');
 
     try {
       await deleteDoc(doc(db, 'todos', id));
     } catch (err) {}
   };
 
+  // レシピステート
   const [openAiModal, setOpenAiModal] = useState(false);
   const [aiInput, setAiInput] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -315,29 +358,8 @@ export default function App() {
   const [openTrash, setOpenTrash] = useState(false);
   const [rQuery, setRQuery] = useState('');
 
-  // --- 高精度レシピ解析（YouTube oEmbed + パルサー解析） ---
-  const handleAnalyzeAiRecipe = async () => {
-    const input = aiInput.trim();
-    if (!input) return;
-
-    setIsAiLoading(true);
-    let videoTitle = '新しいレシピ';
-
-    // 1. YouTube公式oEmbedから正確なタイトルを取得（絶対ブロックされません）
-    if (input.includes('youtube.com') || input.includes('youtu.be')) {
-      try {
-        const res = await fetch('https://noembed.com/embed?url=' + encodeURIComponent(input));
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.title) {
-            videoTitle = data.title;
-          }
-        }
-      } catch (e) {}
-    }
-
-    // 2. 概要欄やテキストから構造化データへ自動分類
-    const lines = input.split('\n').map((l) => l.trim()).filter(Boolean);
+  const parseRecipeText = (text, fallbackTitle) => {
+    const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
 
     const seasoningKeywords = [
       '醤油', 'しょうゆ', 'みりん', '酒', '料理酒', '塩', '胡椒', 'こしょう', '砂糖', '油', 
@@ -394,6 +416,34 @@ export default function App() {
       }
     });
 
+    return {
+      title: fallbackTitle,
+      ingredients: ings,
+      seasonings: seas,
+      steps: stps
+    };
+  };
+
+  const handleAnalyzeAiRecipe = async () => {
+    const input = aiInput.trim();
+    if (!input) return;
+
+    setIsAiLoading(true);
+    let videoTitle = '新しいレシピ';
+
+    if (input.includes('youtube.com') || input.includes('youtu.be')) {
+      try {
+        const res = await fetch('https://noembed.com/embed?url=' + encodeURIComponent(input));
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.title) {
+            videoTitle = data.title;
+          }
+        }
+      } catch (e) {}
+    }
+
+    const parsed = parseRecipeText(input, videoTitle);
     setIsAiLoading(false);
 
     setPreviewRecipe({
@@ -401,23 +451,23 @@ export default function App() {
       title: videoTitle !== '新しいレシピ' ? videoTitle : 'レシピメモ',
       author: '共通',
       sourceUrl: input.startsWith('http') ? input : '',
-      ingredients: ings.length > 0 ? ings : [
+      ingredients: parsed.ingredients.length > 0 ? parsed.ingredients : [
         { name: '手羽先（または手羽元）', amount: '8本' },
         { name: '大根', amount: '1/2本(400g)' },
         { name: 'いんげん', amount: '4本' }
       ],
-      seasonings: seas.length > 0 ? seas : [
+      seasonings: parsed.seasonings.length > 0 ? parsed.seasonings : [
         { name: '醤油', amount: '大さじ3' },
         { name: 'みりん', amount: '大さじ3' },
         { name: '酒', amount: '大さじ3' },
         { name: '砂糖', amount: '大さじ1' },
         { name: '出汁（または水）', amount: '400ml' }
       ],
-      steps: stps.length > 0 ? stps : [
-        '大根は2cm厚さの半月切りにし、下茹で（または電子レンジで6分加熱）しておく。',
-        'フライパンに油を熱し、手羽の表面に焼き色がつくまで強火で焼く。',
-        '大根、出汁、調味料（醤油・みりん・酒・砂糖）を加え、落とし蓋をして中火で15分煮込む。',
-        '煮汁が半量程度になるまで煮詰め、最後に斜め切りにしたインゲンを加えてひと煮立ちさせる。'
+      steps: parsed.steps.length > 0 ? parsed.steps : [
+        '大根は2cm厚さの半月切りにし、下茹でしておく。',
+        'フライパンに油を熱し、手羽の表面に焼き色がつくまで焼く。',
+        '大根、出汁、調味料を加え、落とし蓋をして中火で15分煮込む。',
+        '煮汁が減るまで煮詰め、仕上げにいんげんを加えてひと煮立ちさせる。'
       ]
     });
 
@@ -498,6 +548,11 @@ export default function App() {
     } catch (err) {}
   };
 
+  // 表示フィルタ用ToDo
+  const currentTodos = useMemo(() => {
+    return todos.filter((t) => (t.type || 'shopping') === todoSubTab);
+  }, [todos, todoSubTab]);
+
   return (
     <div className="min-h-screen bg-slate-100 flex justify-center items-start text-slate-800 font-sans">
       <div className="w-full max-w-md bg-white min-h-screen shadow-lg flex flex-col relative pb-20 select-none">
@@ -537,16 +592,40 @@ export default function App() {
           {/* スケジュール */}
           {tab === 'schedule' && (
             <div className="space-y-3">
+              {/* 年月移動バー（ダイレクト年・月切り替え付き） */}
               <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-xs">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1">
                   <button onClick={() => setVDate(new Date(cYear, cMonth - 1, 1))} className="p-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">
                     <ChevronLeft className="w-4 h-4" />
                   </button>
-                  <span className="font-bold text-sm text-slate-800">{cYear}年 {cMonth + 1}月</span>
+                  
+                  {/* 年・月ダイレクト選択ドロップダウン */}
+                  <div className="flex items-center gap-1 font-bold text-sm text-slate-800">
+                    <select
+                      value={cYear}
+                      onChange={(e) => setVDate(new Date(Number(e.target.value), cMonth, 1))}
+                      className="bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 text-xs font-bold text-slate-800 focus:outline-none"
+                    >
+                      {yearOptions.map((y) => (
+                        <option key={y} value={y}>{y}年</option>
+                      ))}
+                    </select>
+                    <select
+                      value={cMonth}
+                      onChange={(e) => setVDate(new Date(cYear, Number(e.target.value), 1))}
+                      className="bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 text-xs font-bold text-slate-800 focus:outline-none"
+                    >
+                      {Array.from({ length: 12 }).map((_, m) => (
+                        <option key={m} value={m}>{m + 1}月</option>
+                      ))}
+                    </select>
+                  </div>
+
                   <button onClick={() => setVDate(new Date(cYear, cMonth + 1, 1))} className="p-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">
                     <ChevronRight className="w-4 h-4" />
                   </button>
                 </div>
+
                 <div className="flex bg-slate-100 p-0.5 rounded-lg text-xs">
                   <button onClick={() => setCalMode('month')} className={'flex items-center gap-1 px-2.5 py-1 rounded font-bold ' + (calMode === 'month' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500')}>
                     <CalendarDays className="w-3.5 h-3.5" />月表示
@@ -638,9 +717,14 @@ export default function App() {
                                 {isMulti && <div className="text-[11px] text-slate-500 font-mono mb-0.5">期間: {item.startDate} 〜 {item.endDate}</div>}
                                 {item.memo && <p className="text-xs text-slate-500">{item.memo}</p>}
                               </div>
-                              <button onClick={(e) => handleDelSched(item.id, e)} className="p-2 text-slate-300 hover:text-rose-500 transition shrink-0">
-                                <Trash2 className="w-4 h-4" />
-                              </button>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button onClick={() => setEditingSched({ ...item })} className="p-1.5 text-slate-400 hover:text-slate-700 transition">
+                                  <Edit2 className="w-4 h-4" />
+                                </button>
+                                <button onClick={(e) => handleDelSched(item.id, e)} className="p-1.5 text-slate-300 hover:text-rose-500 transition">
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
                             </div>
                           );
                         })}
@@ -672,7 +756,14 @@ export default function App() {
                             </div>
                             {item.memo && <p className="text-xs text-slate-500 mt-0.5">{item.memo}</p>}
                           </div>
-                          <button onClick={(e) => handleDelSched(item.id, e)} className="p-2 text-slate-300 hover:text-rose-500"><Trash2 className="w-4 h-4" /></button>
+                          <div className="flex items-center gap-1">
+                            <button onClick={() => setEditingSched({ ...item })} className="p-1.5 text-slate-400 hover:text-slate-700">
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                            <button onClick={(e) => handleDelSched(item.id, e)} className="p-1.5 text-slate-300 hover:text-rose-500">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
                       );
                     })
@@ -682,32 +773,55 @@ export default function App() {
             </div>
           )}
 
-          {/* 買い出しToDo */}
+          {/* ToDo (買出し ＆ やること) */}
           {tab === 'todo' && (
             <div className="space-y-3">
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
-                <div className="text-xs font-bold text-slate-700 mb-2">よく買うもの（タップで追加）</div>
-                <div className="flex flex-wrap gap-1.5">
-                  {freqs.map((name) => (
-                    <button key={name} onClick={() => handleAddTodo(name)} className="text-xs px-2.5 py-1.5 rounded-lg border bg-white text-slate-700 border-slate-200 hover:border-slate-400 shadow-xs active:scale-95 transition">
-                      + {name}
-                    </button>
-                  ))}
-                </div>
+              {/* サブタブ切り替え（買出し vs やることリスト） */}
+              <div className="flex bg-slate-200/70 p-1 rounded-xl text-xs font-bold">
+                <button
+                  onClick={() => setTodoSubTab('shopping')}
+                  className={'flex-1 py-2 rounded-lg flex items-center justify-center gap-1.5 transition ' + (todoSubTab === 'shopping' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500')}
+                >
+                  <ShoppingCart className="w-4 h-4" />買出しリスト ({todos.filter((t) => (t.type || 'shopping') === 'shopping' && !t.done).length})
+                </button>
+                <button
+                  onClick={() => setTodoSubTab('task')}
+                  className={'flex-1 py-2 rounded-lg flex items-center justify-center gap-1.5 transition ' + (todoSubTab === 'task' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500')}
+                >
+                  <ListTodo className="w-4 h-4" />やることリスト ({todos.filter((t) => t.type === 'task' && !t.done).length})
+                </button>
               </div>
 
+              {/* 買出しタブ専用: よく買うものショートカット */}
+              {todoSubTab === 'shopping' && (
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+                  <div className="text-xs font-bold text-slate-700 mb-2">よく買うもの（タップで追加）</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {freqs.map((name) => (
+                      <button key={name} onClick={() => handleAddTodo(name, '共通', 'shopping')} className="text-xs px-2.5 py-1.5 rounded-lg border bg-white text-slate-700 border-slate-200 hover:border-slate-400 shadow-xs active:scale-95 transition">
+                        + {name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="flex items-center justify-between pt-1">
-                <span className="font-bold text-sm text-slate-800">買うもの一覧（{todos.filter((t) => !t.done).length}件）</span>
+                <span className="font-bold text-sm text-slate-800">
+                  {todoSubTab === 'shopping' ? '買出し項目' : 'やること'}（未完了 {currentTodos.filter((t) => !t.done).length}件）
+                </span>
                 <button onClick={() => setOpenAddTodo(true)} className="flex items-center gap-1 bg-slate-900 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-slate-800">
-                  <Plus className="w-3.5 h-3.5" />手動追加
+                  <Plus className="w-3.5 h-3.5" />{todoSubTab === 'shopping' ? '買出し追加' : 'やること追加'}
                 </button>
               </div>
 
               <div className="space-y-2">
-                {todos.filter((t) => !t.done).length === 0 ? (
-                  <div className="py-8 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">買うものはありません</div>
+                {currentTodos.filter((t) => !t.done).length === 0 ? (
+                  <div className="py-8 text-center border border-dashed border-slate-200 rounded-xl text-xs text-slate-400">
+                    {todoSubTab === 'shopping' ? '買出し項目はありません' : 'やることはありません'}
+                  </div>
                 ) : (
-                  todos.filter((t) => !t.done).map((item) => (
+                  currentTodos.filter((t) => !t.done).map((item) => (
                     <div key={item.id} onClick={() => handleToggleTodo(item.id)} className={'p-3 bg-white rounded-xl border border-slate-200 shadow-xs flex items-center justify-between cursor-pointer ' + (STYLES[item.author] ? STYLES[item.author].border : '')}>
                       <div className="flex items-center gap-3">
                         <div className="w-5 h-5 rounded border border-slate-300 flex items-center justify-center text-transparent hover:border-slate-500"><Check className="w-3.5 h-3.5" /></div>
@@ -719,11 +833,11 @@ export default function App() {
                   ))
                 )}
 
-                {todos.filter((t) => t.done).length > 0 && (
+                {currentTodos.filter((t) => t.done).length > 0 && (
                   <div className="pt-2">
-                    <div className="text-[11px] font-bold text-slate-400 mb-1">購入済み ({todos.filter((t) => t.done).length})</div>
+                    <div className="text-[11px] font-bold text-slate-400 mb-1">完了済み ({currentTodos.filter((t) => t.done).length})</div>
                     <div className="space-y-1 opacity-60">
-                      {todos.filter((t) => t.done).map((item) => (
+                      {currentTodos.filter((t) => t.done).map((item) => (
                         <div key={item.id} onClick={() => handleToggleTodo(item.id)} className="p-2 bg-slate-50 rounded-lg border border-slate-200 text-xs line-through text-slate-400 flex items-center justify-between cursor-pointer">
                           <div className="flex items-center gap-2"><Check className="w-3.5 h-3.5 text-slate-500" /><span>{item.name}</span></div>
                           <button onClick={(e) => handleDelTodo(item.id, e)} className="p-1 text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
@@ -817,7 +931,7 @@ export default function App() {
                                 <div>
                                   <div className="font-bold text-slate-600 mb-1.5 flex justify-between items-center">
                                     <span>食材</span>
-                                    <span className="text-[10px] text-slate-400">「買う」で買い出しリストに追加</span>
+                                    <span className="text-[10px] text-slate-400">「買う」で買出しリストに追加</span>
                                   </div>
                                   <div className="space-y-1">
                                     {(recipe.ingredients || []).length === 0 ? (
@@ -832,7 +946,7 @@ export default function App() {
                                               <span className="font-semibold text-slate-800">{name}</span>
                                               {amt && <span className="text-slate-500 font-mono text-[11px]">({amt})</span>}
                                             </div>
-                                            <button onClick={() => handleAddTodo(name)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1 rounded font-bold text-[10px] flex items-center gap-1 transition">
+                                            <button onClick={() => handleAddTodo(name, '共通', 'shopping')} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1 rounded font-bold text-[10px] flex items-center gap-1 transition">
                                               <ShoppingCart className="w-3 h-3" />買う
                                             </button>
                                           </div>
@@ -857,7 +971,7 @@ export default function App() {
                                               <span className="font-semibold text-slate-800">{name}</span>
                                               {amt && <span className="text-slate-600 font-mono text-[11px]">({amt})</span>}
                                             </div>
-                                            <button onClick={() => handleAddTodo(name)} className="bg-white hover:bg-amber-100 text-slate-700 px-2.5 py-1 rounded font-bold text-[10px] flex items-center gap-1 border border-slate-200 transition">
+                                            <button onClick={() => handleAddTodo(name, '共通', 'shopping')} className="bg-white hover:bg-amber-100 text-slate-700 px-2.5 py-1 rounded font-bold text-[10px] flex items-center gap-1 border border-slate-200 transition">
                                               <ShoppingCart className="w-3 h-3" />買う
                                             </button>
                                           </div>
@@ -894,7 +1008,187 @@ export default function App() {
           )}
         </main>
 
-        {/* レシピ入力モーダル */}
+        {/* 予定の編集モーダル */}
+        {editingSched && (
+          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+            <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
+              <div className="flex justify-between items-center pb-2 border-b">
+                <h3 className="font-bold text-sm">予定を編集</h3>
+                <button onClick={() => setEditingSched(null)}><X className="w-5 h-5 text-slate-400" /></button>
+              </div>
+              <form onSubmit={handleSaveEditSched} className="space-y-3">
+                <div className="grid grid-cols-3 gap-2">
+                  {['夫', '妻', '共通'].map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => setEditingSched({ ...editingSched, author: p })}
+                      className={'py-1.5 text-xs font-bold rounded-lg border ' + (editingSched.author === p ? STYLES[p].btn : 'bg-slate-50 text-slate-600')}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  required
+                  placeholder="予定名"
+                  value={editingSched.title}
+                  onChange={(e) => setEditingSched({ ...editingSched, title: e.target.value })}
+                  className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none"
+                />
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[11px] font-bold text-slate-600">日程</span>
+                    <span className="text-[11px] text-amber-700 font-bold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                      {getDurationText(editingSched.startDate, editingSched.endDate)}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <span className="text-[9px] text-slate-400 block mb-0.5">開始日</span>
+                      <input
+                        type="date"
+                        required
+                        value={editingSched.startDate}
+                        onChange={(e) => {
+                          const s = e.target.value;
+                          const eDate = editingSched.endDate < s ? s : editingSched.endDate;
+                          setEditingSched({ ...editingSched, startDate: s, endDate: eDate });
+                        }}
+                        className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[9px] text-slate-400 block mb-0.5">終了日</span>
+                      <input
+                        type="date"
+                        required
+                        min={editingSched.startDate}
+                        value={editingSched.endDate || editingSched.startDate}
+                        onChange={(e) => setEditingSched({ ...editingSched, endDate: e.target.value })}
+                        className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 block mb-0.5">時間</span>
+                  <input
+                    type="time"
+                    value={editingSched.time || ''}
+                    onChange={(e) => setEditingSched({ ...editingSched, time: e.target.value })}
+                    className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs"
+                  />
+                </div>
+                <input
+                  type="text"
+                  placeholder="メモ"
+                  value={editingSched.memo || ''}
+                  onChange={(e) => setEditingSched({ ...editingSched, memo: e.target.value })}
+                  className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none"
+                />
+                <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs">変更を保存</button>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* 予定追加モーダル */}
+        {openAddSched && (
+          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+            <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
+              <div className="flex justify-between items-center pb-2 border-b">
+                <h3 className="font-bold text-sm">予定・旅行を追加</h3>
+                <button onClick={() => setOpenAddSched(false)}><X className="w-5 h-5 text-slate-400" /></button>
+              </div>
+              <form onSubmit={handleAddSched} className="space-y-3">
+                <div className="grid grid-cols-3 gap-2">
+                  {['夫', '妻', '共通'].map((p) => (
+                    <button key={p} type="button" onClick={() => setSAuthor(p)} className={'py-1.5 text-xs font-bold rounded-lg border ' + (sAuthor === p ? STYLES[p].btn : 'bg-slate-50 text-slate-600')}>
+                      {p}
+                    </button>
+                  ))}
+                </div>
+                <input type="text" required placeholder="予定名（北海道旅行など）" value={sTitle} onChange={(e) => setSTitle(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
+                
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[11px] font-bold text-slate-600">日程</span>
+                    <span className="text-[11px] text-amber-700 font-bold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                      {getDurationText(sStart, sEnd)}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <span className="text-[9px] text-slate-400 block mb-0.5">開始日</span>
+                      <input 
+                        type="date" 
+                        required 
+                        value={sStart} 
+                        onChange={(e) => {
+                          setSStart(e.target.value);
+                          if (e.target.value > sEnd) setSEnd(e.target.value);
+                        }} 
+                        className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs" 
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[9px] text-slate-400 block mb-0.5">終了日</span>
+                      <input 
+                        type="date" 
+                        required 
+                        min={sStart}
+                        value={sEnd} 
+                        onChange={(e) => setSEnd(e.target.value)} 
+                        className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs" 
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <span className="text-[10px] text-slate-400 block mb-0.5">時間（空欄の場合は終日）</span>
+                  <input type="time" value={sTime} onChange={(e) => setSTime(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs" />
+                </div>
+                <input type="text" placeholder="メモ（ホテル名など）" value={sMemo} onChange={(e) => setSMemo(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
+                <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs">登録する</button>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* ToDo追加モーダル */}
+        {openAddTodo && (
+          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+            <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
+              <div className="flex justify-between items-center pb-2 border-b">
+                <h3 className="font-bold text-sm">{todoSubTab === 'shopping' ? '買出し品を追加' : 'やること（タスク）を追加'}</h3>
+                <button onClick={() => setOpenAddTodo(false)}><X className="w-5 h-5 text-slate-400" /></button>
+              </div>
+              <form onSubmit={(e) => { e.preventDefault(); handleAddTodo(tName, tAuthor, todoSubTab); setTName(''); setOpenAddTodo(false); }} className="space-y-3">
+                <div className="grid grid-cols-3 gap-2">
+                  {['夫', '妻', '共通'].map((p) => (
+                    <button key={p} type="button" onClick={() => setTAuthor(p)} className={'py-1.5 text-xs font-bold rounded-lg border ' + (tAuthor === p ? STYLES[p].btn : 'bg-slate-50 text-slate-600')}>
+                      {p}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  required
+                  placeholder={todoSubTab === 'shopping' ? "品名（卵、牛乳など）" : "内容（役所手続き、ゴミ出しなど）"}
+                  value={tName}
+                  onChange={(e) => setTName(e.target.value)}
+                  className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none"
+                />
+                <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs">追加する</button>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* AIモーダル */}
         {openAiModal && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -1048,7 +1342,7 @@ export default function App() {
           </div>
         )}
 
-        {/* 編集モーダル */}
+        {/* レシピ編集モーダル */}
         {editingRecipe && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
@@ -1097,93 +1391,6 @@ export default function App() {
           </div>
         )}
 
-        {/* 予定追加モーダル */}
-        {openAddSched && (
-          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-            <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
-              <div className="flex justify-between items-center pb-2 border-b">
-                <h3 className="font-bold text-sm">予定・旅行を追加</h3>
-                <button onClick={() => setOpenAddSched(false)}><X className="w-5 h-5 text-slate-400" /></button>
-              </div>
-              <form onSubmit={handleAddSched} className="space-y-3">
-                <div className="grid grid-cols-3 gap-2">
-                  {['夫', '妻', '共通'].map((p) => (
-                    <button key={p} type="button" onClick={() => setSAuthor(p)} className={'py-1.5 text-xs font-bold rounded-lg border ' + (sAuthor === p ? STYLES[p].btn : 'bg-slate-50 text-slate-600')}>
-                      {p}
-                    </button>
-                  ))}
-                </div>
-                <input type="text" required placeholder="予定名（北海道旅行など）" value={sTitle} onChange={(e) => setSTitle(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
-                
-                <div className="space-y-1">
-                  <div className="flex justify-between items-center">
-                    <span className="text-[11px] font-bold text-slate-600">日程</span>
-                    <span className="text-[11px] text-amber-700 font-bold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
-                      {getDurationText(sStart, sEnd)}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <span className="text-[9px] text-slate-400 block mb-0.5">開始日</span>
-                      <input 
-                        type="date" 
-                        required 
-                        value={sStart} 
-                        onChange={(e) => {
-                          setSStart(e.target.value);
-                          if (e.target.value > sEnd) setSEnd(e.target.value);
-                        }} 
-                        className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs" 
-                      />
-                    </div>
-                    <div>
-                      <span className="text-[9px] text-slate-400 block mb-0.5">終了日</span>
-                      <input 
-                        type="date" 
-                        required 
-                        min={sStart}
-                        value={sEnd} 
-                        onChange={(e) => setSEnd(e.target.value)} 
-                        className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs" 
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <div>
-                  <span className="text-[10px] text-slate-400 block mb-0.5">時間（空欄の場合は終日）</span>
-                  <input type="time" value={sTime} onChange={(e) => setSTime(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-1.5 text-xs" />
-                </div>
-                <input type="text" placeholder="メモ（ホテル名など）" value={sMemo} onChange={(e) => setSMemo(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
-                <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs">登録する</button>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {/* ToDo追加モーダル */}
-        {openAddTodo && (
-          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-            <div className="bg-white w-full max-w-sm rounded-2xl p-4 shadow-xl space-y-3">
-              <div className="flex justify-between items-center pb-2 border-b">
-                <h3 className="font-bold text-sm">買うものを追加</h3>
-                <button onClick={() => setOpenAddTodo(false)}><X className="w-5 h-5 text-slate-400" /></button>
-              </div>
-              <form onSubmit={(e) => { e.preventDefault(); handleAddTodo(tName, tAuthor); setTName(''); setOpenAddTodo(false); }} className="space-y-3">
-                <div className="grid grid-cols-3 gap-2">
-                  {['夫', '妻', '共通'].map((p) => (
-                    <button key={p} type="button" onClick={() => setTAuthor(p)} className={'py-1.5 text-xs font-bold rounded-lg border ' + (tAuthor === p ? STYLES[p].btn : 'bg-slate-50 text-slate-600')}>
-                      {p}
-                    </button>
-                  ))}
-                </div>
-                <input type="text" required placeholder="品名（卵、牛乳など）" value={tName} onChange={(e) => setTName(e.target.value)} className="w-full bg-slate-50 border rounded-lg p-2 text-xs focus:outline-none" />
-                <button type="submit" className="w-full bg-slate-900 text-white font-bold py-2.5 rounded-lg text-xs">追加する</button>
-              </form>
-            </div>
-          </div>
-        )}
-
         {/* ゴミ箱 */}
         {openTrash && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
@@ -1225,7 +1432,7 @@ export default function App() {
                 </span>
               )}
             </div>
-            <span className="text-[11px] mt-0.5">買い出しToDo</span>
+            <span className="text-[11px] mt-0.5">ToDo・買出し</span>
           </button>
           <button onClick={() => setTab('recipe')} className={'flex flex-col items-center flex-1 py-1 ' + (tab === 'recipe' ? 'text-slate-900 font-bold' : 'text-slate-400')}>
             <BookOpen className="w-5 h-5" />
